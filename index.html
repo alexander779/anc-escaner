@@ -227,6 +227,63 @@
     transition:transform .12s ease;
   }
   .slot-btn:active{transform:scale(.95);}
+  .manual-link{
+    background:none;
+    border:none;
+    padding:0;
+    margin-top:3px;
+    font-family:'Inter',sans-serif;
+    font-size:11.5px;
+    font-weight:600;
+    color:var(--teal);
+    text-decoration:underline;
+    cursor:pointer;
+  }
+
+  /* Modal de ingreso manual */
+  .modal-backdrop{
+    position:fixed;
+    inset:0;
+    background:rgba(43,18,32,.55);
+    display:none;
+    align-items:flex-end;
+    justify-content:center;
+    z-index:70;
+  }
+  .modal-backdrop.open{display:flex;}
+  .modal-card{
+    width:100%;
+    max-width:440px;
+    background:var(--paper);
+    border-radius:20px 20px 0 0;
+    padding:22px 20px 28px;
+    box-shadow:0 -6px 24px rgba(43,18,32,.25);
+  }
+  .modal-title{
+    font-family:'Archivo',sans-serif;
+    font-weight:800;
+    font-size:17px;
+    margin:0 0 14px;
+  }
+  .modal-input{
+    width:100%;
+    padding:13px 14px;
+    border-radius:10px;
+    border:1.5px solid var(--line);
+    background:var(--white);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:15px;
+    color:var(--ink);
+    outline:none;
+    margin-bottom:14px;
+  }
+  .modal-input:focus{border-color:var(--teal);}
+  .modal-actions{
+    display:flex;
+    gap:10px;
+  }
+  .modal-actions .btn-outline{flex:1; text-align:center; padding:13px;}
+  .modal-actions .send-btn{flex:1.4; padding:13px;}
   .slot.done .slot-btn{
     background:var(--paper);
     color:var(--ink-soft);
@@ -619,6 +676,7 @@
           <div class="slot-body">
             <div class="slot-label">Código 1</div>
             <div class="slot-value empty" id="value1">Sin escanear</div>
+            <button class="manual-link" onclick="openManualEntry(1)">Escribir a mano</button>
           </div>
           <button class="slot-btn" onclick="startScan(1)">Escanear</button>
         </div>
@@ -627,6 +685,7 @@
           <div class="slot-body">
             <div class="slot-label">Código 2</div>
             <div class="slot-value empty" id="value2">Sin escanear</div>
+            <button class="manual-link" onclick="openManualEntry(2)">Escribir a mano</button>
           </div>
           <button class="slot-btn" onclick="startScan(2)">Escanear</button>
         </div>
@@ -688,10 +747,12 @@
 
     <!-- Tab: Registros -->
     <div id="tabRegistros" style="display:none">
-      <button class="send-btn" style="margin-bottom:20px;" onclick="downloadExcel()">
+      <button class="send-btn" style="margin-bottom:12px;" onclick="downloadExcel()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M3 19h18"/></svg>
         Descargar Excel
       </button>
+      <button class="btn-small" style="width:100%; margin-bottom:20px;" onclick="openRecordForm(null)">+ Agregar registro manual</button>
+
       <div class="section-title">Últimos registros</div>
       <div id="registrosList"><div class="empty-state"><span class="loading-dot"></span> Cargando...</div></div>
     </div>
@@ -706,6 +767,31 @@
   </div>
   <div id="reader"></div>
   <p class="overlay-foot">Apunta la cámara al código de barras o QR</p>
+</div>
+
+<div class="modal-backdrop" id="manualEntryModal">
+  <div class="modal-card">
+    <p class="modal-title" id="manualEntryTitle">Escribir código 1 a mano</p>
+    <input type="text" class="modal-input" id="manualEntryInput" placeholder="Escribe el código aquí" autocomplete="off">
+    <div class="modal-actions">
+      <button class="btn-outline" onclick="closeManualEntry()">Cancelar</button>
+      <button class="send-btn" onclick="confirmManualEntry()">Usar este código</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="recordFormModal">
+  <div class="modal-card">
+    <p class="modal-title" id="recordFormTitle">Agregar registro</p>
+    <input type="text" class="modal-input" id="recordFormName" placeholder="Nombre completo" autocomplete="off">
+    <input type="text" class="modal-input" id="recordFormDni" placeholder="DNI" inputmode="numeric" autocomplete="off">
+    <input type="text" class="modal-input" id="recordFormCode1" placeholder="Código 1" autocomplete="off">
+    <input type="text" class="modal-input" id="recordFormCode2" placeholder="Código 2" autocomplete="off">
+    <div class="modal-actions">
+      <button class="btn-outline" onclick="closeRecordForm()">Cancelar</button>
+      <button class="send-btn" onclick="saveRecordForm()">Guardar</button>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -857,6 +943,35 @@
     }
   }
 
+  /* ============ INGRESO MANUAL (si falla la cámara) ============ */
+  let manualSlot = null;
+
+  function openManualEntry(slotNum){
+    manualSlot = slotNum;
+    document.getElementById('manualEntryTitle').textContent = 'Escribir código ' + slotNum + ' a mano';
+    const input = document.getElementById('manualEntryInput');
+    input.value = scanned[slotNum] || '';
+    document.getElementById('manualEntryModal').classList.add('open');
+    setTimeout(()=> input.focus(), 100);
+  }
+
+  function closeManualEntry(){
+    document.getElementById('manualEntryModal').classList.remove('open');
+    manualSlot = null;
+  }
+
+  function confirmManualEntry(){
+    const value = document.getElementById('manualEntryInput').value.trim();
+    if(!value){
+      showToast('Escribe un código antes de continuar.', true);
+      return;
+    }
+    scanned[manualSlot] = value;
+    updateScanUI();
+    showToast('Código ' + manualSlot + ' guardado ✓');
+    closeManualEntry();
+  }
+
   async function sendToWhatsApp(){
     if(!(scanned[1] && scanned[2])) return;
     const sendBtn = document.getElementById('sendBtn');
@@ -996,7 +1111,7 @@
     try{
       const { data, error } = await sb
         .from('scans')
-        .select('name,dni,code1,code2,created_at')
+        .select('id,name,dni,code1,code2,created_at')
         .order('created_at', { ascending: false })
         .limit(500);
       if(error) throw error;
@@ -1015,10 +1130,90 @@
             <div class="data-card-sub">DNI ${escapeHtml(row.dni)} · ${escapeHtml(row.code1)} · ${escapeHtml(row.code2)}</div>
             <div class="data-card-sub">${formatDate(row.created_at)}</div>
           </div>
+          <div class="data-card-actions">
+            <button class="btn-outline" onclick="openRecordForm(${row.id})">Editar</button>
+            <button class="btn-outline btn-danger" onclick="deleteRecord(${row.id})">Eliminar</button>
+          </div>
         </div>
       `).join('');
     }catch(e){
       container.innerHTML = '<div class="empty-state">Error al cargar. Desliza para reintentar.</div>';
+    }
+  }
+
+  /* ============ ADMIN: Crear / Editar / Eliminar registro ============ */
+  let editingRecordId = null;
+
+  function openRecordForm(id){
+    editingRecordId = id;
+    const title = document.getElementById('recordFormTitle');
+    const nameInput = document.getElementById('recordFormName');
+    const dniInput = document.getElementById('recordFormDni');
+    const c1Input = document.getElementById('recordFormCode1');
+    const c2Input = document.getElementById('recordFormCode2');
+
+    if(id === null){
+      title.textContent = 'Agregar registro';
+      nameInput.value = '';
+      dniInput.value = '';
+      c1Input.value = '';
+      c2Input.value = '';
+    } else {
+      const row = lastRegistros.find(r => r.id === id);
+      if(!row) return;
+      title.textContent = 'Editar registro';
+      nameInput.value = row.name;
+      dniInput.value = row.dni;
+      c1Input.value = row.code1;
+      c2Input.value = row.code2;
+    }
+    document.getElementById('recordFormModal').classList.add('open');
+  }
+
+  function closeRecordForm(){
+    document.getElementById('recordFormModal').classList.remove('open');
+    editingRecordId = null;
+  }
+
+  async function saveRecordForm(){
+    const name = document.getElementById('recordFormName').value.trim();
+    const dni = document.getElementById('recordFormDni').value.trim();
+    const code1 = document.getElementById('recordFormCode1').value.trim();
+    const code2 = document.getElementById('recordFormCode2').value.trim();
+
+    if(!name || !dni || !code1 || !code2){
+      showToast('Completa todos los campos.', true);
+      return;
+    }
+
+    try{
+      if(editingRecordId === null){
+        const { error } = await sb.from('scans').insert({ name, dni, code1, code2 });
+        if(error) throw error;
+        showToast('Registro agregado ✓');
+      } else {
+        const { error } = await sb.from('scans')
+          .update({ name, dni, code1, code2 })
+          .eq('id', editingRecordId);
+        if(error) throw error;
+        showToast('Registro actualizado ✓');
+      }
+      closeRecordForm();
+      loadRegistros();
+    }catch(e){
+      showToast('No se pudo guardar el registro.', true);
+    }
+  }
+
+  async function deleteRecord(id){
+    if(!confirm('¿Eliminar este registro?')) return;
+    try{
+      const { error } = await sb.from('scans').delete().eq('id', id);
+      if(error) throw error;
+      showToast('Registro eliminado');
+      loadRegistros();
+    }catch(e){
+      showToast('No se pudo eliminar.', true);
     }
   }
 

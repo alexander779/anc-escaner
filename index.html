@@ -875,6 +875,27 @@
   let html5Qr = null;
   let activeSlot = null;
 
+  /* Prefijos permitidos por escáner */
+  const CODE1_PREFIX = 'CT979000';
+  const CODE2_PREFIXES = ['01PL', '05PL'];
+
+  function isValidCodeForSlot(slotNum, text){
+    if(slotNum === 1){
+      return text.startsWith(CODE1_PREFIX);
+    }
+    if(slotNum === 2){
+      return CODE2_PREFIXES.some(p => text.startsWith(p));
+    }
+    return true;
+  }
+
+  function invalidCodeMessage(slotNum){
+    if(slotNum === 1){
+      return 'Código inválido. El código 1 debe empezar con ' + CODE1_PREFIX + '. Escanea de nuevo.';
+    }
+    return 'Código inválido. El código 2 debe empezar con ' + CODE2_PREFIXES.join(' o ') + '. Escanea de nuevo.';
+  }
+
   function resetScanState(){
     scanned = { 1: null, 2: null };
     updateScanUI();
@@ -900,8 +921,13 @@
     document.getElementById('sendBtn').disabled = !(scanned[1] && scanned[2]);
   }
 
+  let lastInvalidText = null;
+  let lastInvalidToastAt = 0;
+
   function startScan(slotNum){
     activeSlot = slotNum;
+    lastInvalidText = null;
+    lastInvalidToastAt = 0;
     document.getElementById('overlayTitle').textContent = 'Escaneando código ' + slotNum;
     document.getElementById('overlay').classList.add('open');
 
@@ -924,7 +950,17 @@
       { facingMode: "environment" },
       { fps: 12, qrbox: { width: 260, height: 160 } },
       (decodedText) => {
-        scanned[activeSlot] = decodedText.trim();
+        const text = decodedText.trim();
+        if(!isValidCodeForSlot(activeSlot, text)){
+          const now = Date.now();
+          if(text !== lastInvalidText || (now - lastInvalidToastAt) > 2000){
+            showToast(invalidCodeMessage(activeSlot), true);
+            lastInvalidText = text;
+            lastInvalidToastAt = now;
+          }
+          return; // no detiene el escaneo, sigue pidiendo un código válido
+        }
+        scanned[activeSlot] = text;
         updateScanUI();
         showToast('Código ' + activeSlot + ' escaneado ✓');
         stopScan();
@@ -964,6 +1000,10 @@
     const value = document.getElementById('manualEntryInput').value.trim();
     if(!value){
       showToast('Escribe un código antes de continuar.', true);
+      return;
+    }
+    if(!isValidCodeForSlot(manualSlot, value)){
+      showToast(invalidCodeMessage(manualSlot), true);
       return;
     }
     scanned[manualSlot] = value;

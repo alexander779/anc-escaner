@@ -366,6 +366,25 @@
     padding:10px 16px;
   }
   #reader video{border-radius:16px;}
+  .torch-btn{
+    display:block;
+    margin:14px auto 0;
+    padding:10px 20px;
+    border-radius:999px;
+    border:1px solid rgba(245,243,238,.3);
+    background:rgba(245,243,238,.08);
+    color:var(--paper);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12.5px;
+    letter-spacing:.03em;
+    cursor:pointer;
+  }
+  .torch-btn.on{
+    background:#ffb020;
+    border-color:#ffb020;
+    color:#1a1a1a;
+    font-weight:700;
+  }
   .overlay-foot{
     text-align:center;
     color:rgba(245,243,238,.65);
@@ -1092,6 +1111,7 @@
     <button class="overlay-close" onclick="stopScan()">✕</button>
   </div>
   <div id="reader"></div>
+  <button class="torch-btn" id="torchBtn" onclick="toggleTorch()" style="display:none;">🔦 Encender luz</button>
   <p class="overlay-foot">Apunta la cámara al código de barras o QR</p>
 </div>
 
@@ -1195,7 +1215,7 @@
     const t = document.getElementById('toast');
     t.textContent = msg;
     t.className = 'toast show' + (danger ? ' danger' : '');
-    setTimeout(()=>{ t.className = 'toast'; }, 2800);
+    setTimeout(()=>{ t.className = 'toast'; }, danger ? 5500 : 2800);
   }
 
   /* ============ LOGIN STAFF (DNI) ============ */
@@ -1283,13 +1303,11 @@
 
   /* Validación adicional SOLO para ingreso manual: exige el prefijo Y la cantidad exacta de dígitos */
   function isValidManualCodeForSlot(slotNum, mode, text){
-    if(mode !== 'audit') return isValidCodeForSlot(slotNum, text);
     if(!isValidCodeForSlot(slotNum, text)) return false;
     return text.length === CODE_LENGTH;
   }
 
   function invalidManualCodeMessage(slotNum, mode){
-    if(mode !== 'audit') return invalidCodeMessage(slotNum);
     if(slotNum === 1){
       return 'Cartón inválido. Debe empezar con ' + CODE1_PREFIX + ' y tener ' + CODE_LENGTH + ' caracteres en total (ej. CT9790000147407).';
     }
@@ -1329,6 +1347,7 @@
     scanMode = mode;
     lastInvalidText = null;
     lastInvalidToastAt = 0;
+    primeAudio();
     const overlayLabel = mode === 'audit'
       ? (slotNum === 1 ? 'Escaneando cartón' : 'Escaneando pallet')
       : ('Escaneando código ' + slotNum);
@@ -1367,10 +1386,75 @@
         handleScanSuccess(activeSlot, scanMode, text);
       },
       () => { /* frame sin resultado, ignorar */ }
-    ).catch((err) => {
+    ).then(() => {
+      setupTorchButton();
+    }).catch((err) => {
       showToast('No se pudo abrir la cámara. Revisa permisos.', true);
       document.getElementById('overlay').classList.remove('open');
     });
+  }
+
+  /* ---------- Linterna (encender la cámara para escanear en poca luz) ---------- */
+  let torchOn = false;
+
+  function setupTorchButton(){
+    const btn = document.getElementById('torchBtn');
+    torchOn = false;
+    btn.classList.remove('on');
+    btn.textContent = '🔦 Encender luz';
+    try{
+      const capabilities = html5Qr.getRunningTrackCapabilities ? html5Qr.getRunningTrackCapabilities() : null;
+      if(capabilities && capabilities.torch){
+        btn.style.display = 'block';
+      } else {
+        btn.style.display = 'none';
+      }
+    }catch(e){
+      btn.style.display = 'none';
+    }
+  }
+
+  async function toggleTorch(){
+    if(!html5Qr) return;
+    try{
+      torchOn = !torchOn;
+      await html5Qr.applyVideoConstraints({ advanced: [{ torch: torchOn }] });
+      const btn = document.getElementById('torchBtn');
+      btn.classList.toggle('on', torchOn);
+      btn.textContent = torchOn ? '🔦 Apagar luz' : '🔦 Encender luz';
+    }catch(e){
+      torchOn = false;
+      showToast('Este dispositivo no permite controlar la linterna.', true);
+    }
+  }
+
+  /* ---------- Pitido de escáner al detectar un código válido ---------- */
+  let audioCtx = null;
+
+  function primeAudio(){
+    /* crea/desbloquea el AudioContext dentro del gesto de clic del usuario (necesario en iOS/Safari) */
+    try{
+      if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if(audioCtx.state === 'suspended') audioCtx.resume();
+    }catch(e){ /* audio no soportado */ }
+  }
+
+  function playBeep(){
+    try{
+      if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if(audioCtx.state === 'suspended') audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = 1800;
+      gain.gain.setValueAtTime(0.001, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.3, audioCtx.currentTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.14);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.15);
+    }catch(e){ /* audio no soportado o bloqueado por el navegador */ }
   }
 
   let scanHandled = false;
@@ -1378,32 +1462,37 @@
   async function handleScanSuccess(slotNum, mode, text){
     if(scanHandled) return; // evita procesar el mismo cuadro varias veces mientras se cierra la cámara
     scanHandled = true;
+    playBeep();
     stopScan();
+    const proceed = await confirmNotDuplicate(mode, slotNum, text);
+    scanHandled = false;
+    if(!proceed) return;
     if(mode === 'audit'){
-      const proceed = await confirmNotDuplicateAudit(slotNum, text);
-      scanHandled = false;
-      if(!proceed) return;
       scannedAudit[slotNum] = text;
       updateAuditScanUI();
     } else if(mode === 'despacho'){
       scannedDespacho[slotNum] = text;
       updateDespachoScanUI();
-      scanHandled = false;
     } else {
       scanned[slotNum] = text;
       updateScanUI();
-      scanHandled = false;
     }
     showToast((mode === 'audit' ? (slotNum === 1 ? 'Cartón' : 'Pallet') : ('Código ' + slotNum)) + ' escaneado ✓');
   }
 
-  /* Verifica si ya existe una auditoría registrada con este mismo cartón o pallet.
+  /* Verifica si ya existe un registro con este mismo código (cartón/pallet o código 1/2),
+     dentro de la tabla que corresponde a cada flujo (auditoría, fileado o despacho).
      Devuelve true si se puede continuar (no hay duplicado, o el usuario decide seguir igual). */
-  async function confirmNotDuplicateAudit(slotNum, value){
+  const DUPLICATE_TABLE_BY_MODE = { audit: 'audits', staff: 'scans', despacho: 'dispatch_records' };
+  const DUPLICATE_VERB_BY_MODE = { audit: 'auditado', staff: 'registrado', despacho: 'despachado' };
+
+  async function confirmNotDuplicate(mode, slotNum, value){
     try{
+      const table = DUPLICATE_TABLE_BY_MODE[mode];
+      if(!table) return true;
       const field = slotNum === 1 ? 'code1' : 'code2';
       const { data, error } = await sb
-        .from('audits')
+        .from(table)
         .select('name,created_at')
         .eq(field, value)
         .order('created_at', { ascending: false })
@@ -1411,18 +1500,24 @@
       if(error) throw error;
       if(data && data.length > 0){
         const r = data[0];
-        const label = slotNum === 1 ? 'este cartón' : 'este pallet';
-        const msg = 'Ya existe un registro con ' + label + ', auditado por ' + r.name + ' el ' + formatDate(r.created_at) + '.\n\n¿Deseas continuar de todas formas?';
+        const label = mode === 'audit' ? (slotNum === 1 ? 'este cartón' : 'este pallet') : ('este código ' + slotNum);
+        const verb = DUPLICATE_VERB_BY_MODE[mode] || 'registrado';
+        const msg = 'Ya existe un registro con ' + label + ', ' + verb + ' por ' + r.name + ' el ' + formatDate(r.created_at) + '.\n\n¿Deseas continuar de todas formas?';
         return confirm(msg);
       }
       return true;
     }catch(e){
-      return true; // si falla la verificación, no bloquear al auditor
+      return true; // si falla la verificación, no bloquear al usuario
     }
   }
 
   function stopScan(){
     document.getElementById('overlay').classList.remove('open');
+    const torchBtn = document.getElementById('torchBtn');
+    torchOn = false;
+    torchBtn.classList.remove('on');
+    torchBtn.textContent = '🔦 Encender luz';
+    torchBtn.style.display = 'none';
     if(html5Qr){
       html5Qr.stop().then(()=>{ html5Qr.clear(); html5Qr=null; }).catch(()=>{ html5Qr=null; });
     }
@@ -1441,15 +1536,10 @@
     const hint = document.getElementById('manualEntryHint');
     const store = mode === 'audit' ? scannedAudit : (mode === 'despacho' ? scannedDespacho : scanned);
     input.value = store[slotNum] || '';
-    if(mode === 'audit'){
-      input.setAttribute('maxlength', CODE_LENGTH);
-      if(hint){
-        hint.textContent = 'Debe tener exactamente ' + CODE_LENGTH + ' caracteres. Ej: ' + (slotNum === 1 ? 'CT9790000147407' : '01PL97900102730');
-        hint.style.display = 'block';
-      }
-    } else {
-      input.removeAttribute('maxlength');
-      if(hint) hint.style.display = 'none';
+    input.setAttribute('maxlength', CODE_LENGTH);
+    if(hint){
+      hint.textContent = 'Debe tener exactamente ' + CODE_LENGTH + ' caracteres. Ej: ' + (slotNum === 1 ? 'CT9790000147407' : '01PL97900102730');
+      hint.style.display = 'block';
     }
     document.getElementById('manualEntryModal').classList.add('open');
     setTimeout(()=> input.focus(), 100);
@@ -1470,11 +1560,11 @@
       showToast(invalidManualCodeMessage(manualSlot, manualMode), true);
       return;
     }
+    const proceed = await confirmNotDuplicate(manualMode, manualSlot, value);
+    if(!proceed){
+      return;
+    }
     if(manualMode === 'audit'){
-      const proceed = await confirmNotDuplicateAudit(manualSlot, value);
-      if(!proceed){
-        return;
-      }
       scannedAudit[manualSlot] = value;
       updateAuditScanUI();
     } else if(manualMode === 'despacho'){
@@ -2587,9 +2677,11 @@
   /* ============ ADMIN: Pickers ============ */
   let pickersCache = [];
   let pickersLoaded = false;
+  let pickersLoadError = null;
 
   async function ensurePickersLoaded(force=false){
     if(pickersLoaded && !force) return;
+    pickersLoadError = null;
     try{
       const { data, error } = await sb
         .from('pickers')
@@ -2601,7 +2693,9 @@
       pickersLoaded = true;
       buildPickerSelectOptions();
     }catch(e){
-      /* si la tabla "pickers" todavía no existe en Supabase, la lista queda vacía */
+      console.error('Error cargando pickers:', e);
+      pickersLoadError = (e && (e.message || e.error_description)) || 'Error desconocido';
+      pickersCache = [];
     }
   }
 
@@ -2618,6 +2712,10 @@
   function renderPickersList(){
     const container = document.getElementById('pickersList');
     if(!container) return;
+    if(pickersLoadError){
+      container.innerHTML = '<div class="empty-state">⚠ No se pudo cargar la lista de pickers.<br><br>Detalle: ' + escapeHtml(pickersLoadError) + '<br><br>Verifica que exista la tabla <b>pickers</b> en Supabase (revisa la sección "Configuración de Supabase" que te compartí) y que las políticas RLS permitan leer/escribir.</div>';
+      return;
+    }
     const searchEl = document.getElementById('pickerSearchInput');
     const search = (searchEl ? searchEl.value : '').trim().toLowerCase();
     let list = pickersCache;
@@ -2662,7 +2760,8 @@
       await ensurePickersLoaded(true);
       renderPickersList();
     }catch(e){
-      showToast('No se pudo agregar el picker. Verifica que exista la tabla "pickers" en Supabase.', true);
+      console.error('Error agregando picker:', e);
+      showToast('No se pudo agregar el picker: ' + (e.message || 'error desconocido'), true);
     }
   }
 
@@ -2673,7 +2772,8 @@
       await ensurePickersLoaded(true);
       renderPickersList();
     }catch(e){
-      showToast('No se pudo actualizar.', true);
+      console.error('Error actualizando picker:', e);
+      showToast('No se pudo actualizar: ' + (e.message || 'error desconocido'), true);
     }
   }
 
@@ -2686,8 +2786,16 @@
       await ensurePickersLoaded(true);
       renderPickersList();
     }catch(e){
-      showToast('No se pudo eliminar.', true);
+      console.error('Error eliminando picker:', e);
+      showToast('No se pudo eliminar: ' + (e.message || 'error desconocido'), true);
     }
+  }
+
+  function normalizeHeaderCell(cell){
+    return String(cell || '')
+      .trim()
+      .toUpperCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // quita tildes
   }
 
   async function importPickersExcel(){
@@ -2703,23 +2811,26 @@
       const sheet = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
 
+      const DNI_HEADERS = ['DNI', 'N DOCUMENTO', 'NRO DOCUMENTO', 'NUMERO DE DOCUMENTO', 'DOCUMENTO', 'DNI PICKER', 'CODIGO', 'CODIGO PICKER', 'ID'];
+      const NAME_HEADERS = ['NOMBRE', 'NOMBRES', 'NOMBRE COMPLETO', 'NOMBRES Y APELLIDOS', 'APELLIDOS Y NOMBRES', 'PICKER', 'TRABAJADOR', 'COLABORADOR', 'EMPLEADO'];
+
       let headerRowIdx = -1, colDni = -1, colName = -1;
       for(let i = 0; i < Math.min(rows.length, 30); i++){
         const row = rows[i];
         if(!Array.isArray(row)) continue;
-        const idxDni = row.findIndex(cell => String(cell).trim().toUpperCase() === 'DNI');
+        const idxDni = row.findIndex(cell => DNI_HEADERS.includes(normalizeHeaderCell(cell)));
         const idxName = row.findIndex(cell => {
-          const c = String(cell).trim().toUpperCase();
-          return c === 'NOMBRE' || c === 'NOMBRES' || c.startsWith('NOMBRE COMPLETO');
+          const c = normalizeHeaderCell(cell);
+          return NAME_HEADERS.includes(c) || c.startsWith('NOMBRE');
         });
-        if(idxDni > -1 && idxName > -1){
+        if(idxDni > -1 && idxName > -1 && idxDni !== idxName){
           headerRowIdx = i; colDni = idxDni; colName = idxName;
           break;
         }
       }
 
       if(headerRowIdx === -1){
-        showToast('No se encontraron las columnas DNI y NOMBRE en el Excel.', true);
+        showToast('No se encontraron columnas de DNI y Nombre en el Excel. Usa encabezados como "DNI" y "NOMBRE" en la primera fila.', true);
         return;
       }
 
@@ -2727,32 +2838,37 @@
       for(let i = headerRowIdx + 1; i < rows.length; i++){
         const row = rows[i];
         if(!Array.isArray(row)) continue;
-        const dni = row[colDni] !== undefined ? String(row[colDni]).trim() : '';
+        let dni = row[colDni] !== undefined ? String(row[colDni]).trim() : '';
         const name = row[colName] !== undefined ? String(row[colName]).trim() : '';
+        // si el DNI vino como número (ej. 74918782.0), quita el .0 final
+        dni = dni.replace(/\.0$/, '');
         if(dni && name){
           pickers.push({ dni, name, active: true });
         }
       }
 
       if(pickers.length === 0){
-        showToast('El archivo no tiene pickers válidos.', true);
+        showToast('El archivo no tiene filas con DNI y Nombre completos.', true);
         return;
       }
 
       showToast('Importando ' + pickers.length + ' pickers...');
       const chunkSize = 500;
+      let imported = 0;
       for(let i = 0; i < pickers.length; i += chunkSize){
         const chunk = pickers.slice(i, i + chunkSize);
         const { error } = await sb.from('pickers').upsert(chunk, { onConflict: 'dni' });
         if(error) throw error;
+        imported += chunk.length;
       }
 
-      showToast('Pickers importados ✓ (' + pickers.length + ')');
+      showToast('Pickers importados ✓ (' + imported + ')');
       fileInput.value = '';
       await ensurePickersLoaded(true);
       renderPickersList();
     }catch(e){
-      showToast('No se pudo importar el Excel. Verifica que exista la tabla "pickers" en Supabase.', true);
+      console.error('Error importando pickers:', e);
+      showToast('No se pudo importar: ' + (e.message || 'error desconocido'), true);
     }
   }
 

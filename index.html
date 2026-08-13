@@ -957,6 +957,7 @@
       <button class="tab-btn" id="tabBtnAuditores" onclick="showAdminTab('auditores')">DNIs auditoría</button>
       <button class="tab-btn" id="tabBtnAuditorias" onclick="showAdminTab('auditorias')">Auditorías</button>
       <button class="tab-btn" id="tabBtnProductos" onclick="showAdminTab('productos')">Productos</button>
+      <button class="tab-btn" id="tabBtnPickers" onclick="showAdminTab('pickers')">Pickers</button>
     </div>
 
     <!-- Tab: DNIs despacho -->
@@ -1060,6 +1061,27 @@
       <div class="section-title">Últimas auditorías</div>
       <div id="auditoriasList"><div class="empty-state"><span class="loading-dot"></span> Cargando...</div></div>
     </div>
+
+    <!-- Tab: Pickers -->
+    <div id="tabPickers" style="display:none">
+      <p class="hint" style="margin:0 0 12px;">Registra a los pickers para poder asignarles las incidencias de faltas/sobras encontradas en auditoría.</p>
+      <div class="file-import-row">
+        <input type="file" id="pickersExcelInput" accept=".xlsx,.xls,.csv">
+        <button class="btn-small" onclick="importPickersExcel()">Importar Excel</button>
+      </div>
+      <p class="hint" style="margin:0 0 18px;">El Excel debe tener columnas DNI y NOMBRE (en cualquier orden, en las primeras filas).</p>
+
+      <div class="form-row">
+        <input type="text" id="newPickerDniInput" placeholder="DNI" inputmode="numeric">
+        <input type="text" id="newPickerName" placeholder="Nombre completo">
+      </div>
+      <button class="btn-small" style="width:100%; margin-bottom:20px;" onclick="addPicker()">+ Agregar picker</button>
+
+      <input type="text" class="modal-input" id="pickerSearchInput" placeholder="Buscar picker por nombre o DNI" autocomplete="off" oninput="renderPickersList()" style="margin-bottom:16px;">
+
+      <div class="section-title">Pickers registrados</div>
+      <div id="pickersList"><div class="empty-state"><span class="loading-dot"></span> Cargando...</div></div>
+    </div>
   </div>
 
 </div>
@@ -1077,6 +1099,7 @@
   <div class="modal-card">
     <p class="modal-title" id="manualEntryTitle">Escribir código 1 a mano</p>
     <input type="text" class="modal-input" id="manualEntryInput" placeholder="Escribe el código aquí" autocomplete="off">
+    <p class="hint" id="manualEntryHint" style="display:none; margin:-8px 0 12px;"></p>
     <div class="modal-actions">
       <button class="btn-outline" onclick="closeManualEntry()">Cancelar</button>
       <button class="send-btn" onclick="confirmManualEntry()">Usar este código</button>
@@ -1139,6 +1162,10 @@
     <div id="auditRecordProductWrap">
       <input type="text" class="modal-input" id="auditRecordProduct" list="productsDatalist" placeholder="Código - Descripción del producto" autocomplete="off">
       <input type="number" class="modal-input" id="auditRecordQuantity" placeholder="Cantidad" min="0" step="1">
+      <select id="auditRecordPicker" class="modal-input">
+        <option value="">Sin asignar</option>
+      </select>
+      <p class="hint" style="margin:-8px 0 12px;">Picker responsable de la incidencia (opcional). Regístralos en la pestaña "Pickers".</p>
     </div>
     <div class="modal-actions">
       <button class="btn-outline" onclick="closeAuditRecordForm()">Cancelar</button>
@@ -1234,6 +1261,8 @@
   /* Prefijos permitidos por escáner */
   const CODE1_PREFIX = 'CT979000';
   const CODE2_PREFIXES = ['01PL', '05PL'];
+  /* Longitud exacta esperada de cada código (ej. CT9790000147407 / 01PL97900102730) */
+  const CODE_LENGTH = 15;
 
   function isValidCodeForSlot(slotNum, text){
     if(slotNum === 1){
@@ -1250,6 +1279,21 @@
       return 'Código inválido. El código 1 debe empezar con ' + CODE1_PREFIX + '. Escanea de nuevo.';
     }
     return 'Código inválido. El código 2 debe empezar con ' + CODE2_PREFIXES.join(' o ') + '. Escanea de nuevo.';
+  }
+
+  /* Validación adicional SOLO para ingreso manual: exige el prefijo Y la cantidad exacta de dígitos */
+  function isValidManualCodeForSlot(slotNum, mode, text){
+    if(mode !== 'audit') return isValidCodeForSlot(slotNum, text);
+    if(!isValidCodeForSlot(slotNum, text)) return false;
+    return text.length === CODE_LENGTH;
+  }
+
+  function invalidManualCodeMessage(slotNum, mode){
+    if(mode !== 'audit') return invalidCodeMessage(slotNum);
+    if(slotNum === 1){
+      return 'Cartón inválido. Debe empezar con ' + CODE1_PREFIX + ' y tener ' + CODE_LENGTH + ' caracteres en total (ej. CT9790000147407).';
+    }
+    return 'Pallet inválido. Debe empezar con ' + CODE2_PREFIXES.join(' o ') + ' y tener ' + CODE_LENGTH + ' caracteres en total (ej. 01PL97900102730).';
   }
 
   function resetScanState(){
@@ -1320,24 +1364,61 @@
           }
           return; // no detiene el escaneo, sigue pidiendo un código válido
         }
-        if(scanMode === 'audit'){
-          scannedAudit[activeSlot] = text;
-          updateAuditScanUI();
-        } else if(scanMode === 'despacho'){
-          scannedDespacho[activeSlot] = text;
-          updateDespachoScanUI();
-        } else {
-          scanned[activeSlot] = text;
-          updateScanUI();
-        }
-        showToast((scanMode === 'audit' ? (activeSlot === 1 ? 'Cartón' : 'Pallet') : ('Código ' + activeSlot)) + ' escaneado ✓');
-        stopScan();
+        handleScanSuccess(activeSlot, scanMode, text);
       },
       () => { /* frame sin resultado, ignorar */ }
     ).catch((err) => {
       showToast('No se pudo abrir la cámara. Revisa permisos.', true);
       document.getElementById('overlay').classList.remove('open');
     });
+  }
+
+  let scanHandled = false;
+
+  async function handleScanSuccess(slotNum, mode, text){
+    if(scanHandled) return; // evita procesar el mismo cuadro varias veces mientras se cierra la cámara
+    scanHandled = true;
+    stopScan();
+    if(mode === 'audit'){
+      const proceed = await confirmNotDuplicateAudit(slotNum, text);
+      scanHandled = false;
+      if(!proceed) return;
+      scannedAudit[slotNum] = text;
+      updateAuditScanUI();
+    } else if(mode === 'despacho'){
+      scannedDespacho[slotNum] = text;
+      updateDespachoScanUI();
+      scanHandled = false;
+    } else {
+      scanned[slotNum] = text;
+      updateScanUI();
+      scanHandled = false;
+    }
+    showToast((mode === 'audit' ? (slotNum === 1 ? 'Cartón' : 'Pallet') : ('Código ' + slotNum)) + ' escaneado ✓');
+  }
+
+  /* Verifica si ya existe una auditoría registrada con este mismo cartón o pallet.
+     Devuelve true si se puede continuar (no hay duplicado, o el usuario decide seguir igual). */
+  async function confirmNotDuplicateAudit(slotNum, value){
+    try{
+      const field = slotNum === 1 ? 'code1' : 'code2';
+      const { data, error } = await sb
+        .from('audits')
+        .select('name,created_at')
+        .eq(field, value)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if(error) throw error;
+      if(data && data.length > 0){
+        const r = data[0];
+        const label = slotNum === 1 ? 'este cartón' : 'este pallet';
+        const msg = 'Ya existe un registro con ' + label + ', auditado por ' + r.name + ' el ' + formatDate(r.created_at) + '.\n\n¿Deseas continuar de todas formas?';
+        return confirm(msg);
+      }
+      return true;
+    }catch(e){
+      return true; // si falla la verificación, no bloquear al auditor
+    }
   }
 
   function stopScan(){
@@ -1357,8 +1438,19 @@
     const label = mode === 'audit' ? (slotNum === 1 ? 'el cartón' : 'el pallet') : ('código ' + slotNum);
     document.getElementById('manualEntryTitle').textContent = 'Escribir ' + label + ' a mano';
     const input = document.getElementById('manualEntryInput');
+    const hint = document.getElementById('manualEntryHint');
     const store = mode === 'audit' ? scannedAudit : (mode === 'despacho' ? scannedDespacho : scanned);
     input.value = store[slotNum] || '';
+    if(mode === 'audit'){
+      input.setAttribute('maxlength', CODE_LENGTH);
+      if(hint){
+        hint.textContent = 'Debe tener exactamente ' + CODE_LENGTH + ' caracteres. Ej: ' + (slotNum === 1 ? 'CT9790000147407' : '01PL97900102730');
+        hint.style.display = 'block';
+      }
+    } else {
+      input.removeAttribute('maxlength');
+      if(hint) hint.style.display = 'none';
+    }
     document.getElementById('manualEntryModal').classList.add('open');
     setTimeout(()=> input.focus(), 100);
   }
@@ -1368,17 +1460,21 @@
     manualSlot = null;
   }
 
-  function confirmManualEntry(){
-    const value = document.getElementById('manualEntryInput').value.trim();
+  async function confirmManualEntry(){
+    const value = document.getElementById('manualEntryInput').value.trim().toUpperCase();
     if(!value){
       showToast('Escribe un código antes de continuar.', true);
       return;
     }
-    if(!isValidCodeForSlot(manualSlot, value)){
-      showToast(invalidCodeMessage(manualSlot), true);
+    if(!isValidManualCodeForSlot(manualSlot, manualMode, value)){
+      showToast(invalidManualCodeMessage(manualSlot, manualMode), true);
       return;
     }
     if(manualMode === 'audit'){
+      const proceed = await confirmNotDuplicateAudit(manualSlot, value);
+      if(!proceed){
+        return;
+      }
       scannedAudit[manualSlot] = value;
       updateAuditScanUI();
     } else if(manualMode === 'despacho'){
@@ -1802,7 +1898,7 @@
   }
 
   function showAdminTab(tab){
-    const tabs = ['dnis', 'auditores', 'productos', 'registros', 'auditorias', 'dnisDespacho', 'despacho'];
+    const tabs = ['dnis', 'auditores', 'productos', 'registros', 'auditorias', 'dnisDespacho', 'despacho', 'pickers'];
     tabs.forEach(t => {
       const suffix = t.charAt(0).toUpperCase() + t.slice(1);
       const btn = document.getElementById('tabBtn' + suffix);
@@ -1813,9 +1909,10 @@
     if(tab === 'registros') loadRegistros();
     if(tab === 'auditores') loadAuditoresList();
     if(tab === 'productos'){ ensureProductsLoaded(true).then(renderAdminProductsList); }
-    if(tab === 'auditorias') loadAuditorias();
+    if(tab === 'auditorias'){ ensurePickersLoaded(true).then(loadAuditorias); }
     if(tab === 'dnisDespacho') loadDispatchersList();
     if(tab === 'despacho') loadDespachoRegistros();
+    if(tab === 'pickers'){ ensurePickersLoaded(true).then(renderPickersList); }
   }
 
   /* ============ ADMIN: DNIs autorizados ============ */
@@ -2487,6 +2584,178 @@
     }
   }
 
+  /* ============ ADMIN: Pickers ============ */
+  let pickersCache = [];
+  let pickersLoaded = false;
+
+  async function ensurePickersLoaded(force=false){
+    if(pickersLoaded && !force) return;
+    try{
+      const { data, error } = await sb
+        .from('pickers')
+        .select('dni,name,active')
+        .order('name', { ascending: true })
+        .limit(5000);
+      if(error) throw error;
+      pickersCache = data || [];
+      pickersLoaded = true;
+      buildPickerSelectOptions();
+    }catch(e){
+      /* si la tabla "pickers" todavía no existe en Supabase, la lista queda vacía */
+    }
+  }
+
+  function buildPickerSelectOptions(){
+    const sel = document.getElementById('auditRecordPicker');
+    if(!sel) return;
+    const current = sel.value;
+    const activePickers = pickersCache.filter(p => p.active !== false);
+    sel.innerHTML = '<option value="">Sin asignar</option>' +
+      activePickers.map(p => `<option value="${escapeHtml(p.dni)}">${escapeHtml(p.name)} — ${escapeHtml(p.dni)}</option>`).join('');
+    if(current) sel.value = current;
+  }
+
+  function renderPickersList(){
+    const container = document.getElementById('pickersList');
+    if(!container) return;
+    const searchEl = document.getElementById('pickerSearchInput');
+    const search = (searchEl ? searchEl.value : '').trim().toLowerCase();
+    let list = pickersCache;
+    if(search){
+      list = list.filter(p =>
+        (p.name || '').toLowerCase().includes(search) ||
+        (p.dni || '').toLowerCase().includes(search)
+      );
+    }
+    if(list.length === 0){
+      container.innerHTML = '<div class="empty-state">Todavía no hay pickers registrados.</div>';
+      return;
+    }
+    container.innerHTML = list.map(row => `
+      <div class="data-card">
+        <div class="data-card-main">
+          <div class="data-card-name">${escapeHtml(row.name)}</div>
+          <div class="data-card-sub">DNI ${escapeHtml(row.dni)}</div>
+        </div>
+        <div class="data-card-actions">
+          <span class="badge ${row.active !== false ? 'badge-active' : 'badge-inactive'}">${row.active !== false ? 'Activo' : 'Inactivo'}</span>
+          <button class="btn-outline" onclick="togglePicker('${row.dni}', ${row.active === false})">${row.active !== false ? 'Desactivar' : 'Activar'}</button>
+          <button class="btn-outline btn-danger" onclick="deletePicker('${row.dni}')">Eliminar</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  async function addPicker(){
+    const dni = document.getElementById('newPickerDniInput').value.trim();
+    const name = document.getElementById('newPickerName').value.trim();
+    if(!dni || !name){
+      showToast('Completa el DNI y el nombre del picker.', true);
+      return;
+    }
+    try{
+      const { error } = await sb.from('pickers').upsert({ dni, name, active: true });
+      if(error) throw error;
+      document.getElementById('newPickerDniInput').value = '';
+      document.getElementById('newPickerName').value = '';
+      showToast('Picker agregado ✓');
+      await ensurePickersLoaded(true);
+      renderPickersList();
+    }catch(e){
+      showToast('No se pudo agregar el picker. Verifica que exista la tabla "pickers" en Supabase.', true);
+    }
+  }
+
+  async function togglePicker(dni, newActive){
+    try{
+      const { error } = await sb.from('pickers').update({ active: newActive }).eq('dni', dni);
+      if(error) throw error;
+      await ensurePickersLoaded(true);
+      renderPickersList();
+    }catch(e){
+      showToast('No se pudo actualizar.', true);
+    }
+  }
+
+  async function deletePicker(dni){
+    if(!confirm('¿Eliminar este picker?')) return;
+    try{
+      const { error } = await sb.from('pickers').delete().eq('dni', dni);
+      if(error) throw error;
+      showToast('Picker eliminado');
+      await ensurePickersLoaded(true);
+      renderPickersList();
+    }catch(e){
+      showToast('No se pudo eliminar.', true);
+    }
+  }
+
+  async function importPickersExcel(){
+    const fileInput = document.getElementById('pickersExcelInput');
+    const file = fileInput.files && fileInput.files[0];
+    if(!file){
+      showToast('Selecciona un archivo Excel primero.', true);
+      return;
+    }
+    try{
+      const buffer = await file.arrayBuffer();
+      const wb = XLSX.read(buffer, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+
+      let headerRowIdx = -1, colDni = -1, colName = -1;
+      for(let i = 0; i < Math.min(rows.length, 30); i++){
+        const row = rows[i];
+        if(!Array.isArray(row)) continue;
+        const idxDni = row.findIndex(cell => String(cell).trim().toUpperCase() === 'DNI');
+        const idxName = row.findIndex(cell => {
+          const c = String(cell).trim().toUpperCase();
+          return c === 'NOMBRE' || c === 'NOMBRES' || c.startsWith('NOMBRE COMPLETO');
+        });
+        if(idxDni > -1 && idxName > -1){
+          headerRowIdx = i; colDni = idxDni; colName = idxName;
+          break;
+        }
+      }
+
+      if(headerRowIdx === -1){
+        showToast('No se encontraron las columnas DNI y NOMBRE en el Excel.', true);
+        return;
+      }
+
+      const pickers = [];
+      for(let i = headerRowIdx + 1; i < rows.length; i++){
+        const row = rows[i];
+        if(!Array.isArray(row)) continue;
+        const dni = row[colDni] !== undefined ? String(row[colDni]).trim() : '';
+        const name = row[colName] !== undefined ? String(row[colName]).trim() : '';
+        if(dni && name){
+          pickers.push({ dni, name, active: true });
+        }
+      }
+
+      if(pickers.length === 0){
+        showToast('El archivo no tiene pickers válidos.', true);
+        return;
+      }
+
+      showToast('Importando ' + pickers.length + ' pickers...');
+      const chunkSize = 500;
+      for(let i = 0; i < pickers.length; i += chunkSize){
+        const chunk = pickers.slice(i, i + chunkSize);
+        const { error } = await sb.from('pickers').upsert(chunk, { onConflict: 'dni' });
+        if(error) throw error;
+      }
+
+      showToast('Pickers importados ✓ (' + pickers.length + ')');
+      fileInput.value = '';
+      await ensurePickersLoaded(true);
+      renderPickersList();
+    }catch(e){
+      showToast('No se pudo importar el Excel. Verifica que exista la tabla "pickers" en Supabase.', true);
+    }
+  }
+
   /* ============ ADMIN: Auditorías ============ */
   let lastAudits = [];
 
@@ -2496,7 +2765,7 @@
     try{
       const { data, error } = await sb
         .from('audits')
-        .select('id,dni,name,code1,code2,case_type,product_codigo,product_descripcion,cantidad,created_at')
+        .select('id,dni,name,code1,code2,case_type,product_codigo,product_descripcion,cantidad,picker_dni,picker_name,created_at')
         .order('created_at', { ascending: false })
         .limit(500);
       if(error) throw error;
@@ -2538,7 +2807,9 @@
         (r.code1 || '').toLowerCase().includes(search) ||
         (r.code2 || '').toLowerCase().includes(search) ||
         (r.product_codigo || '').toLowerCase().includes(search) ||
-        (r.product_descripcion || '').toLowerCase().includes(search)
+        (r.product_descripcion || '').toLowerCase().includes(search) ||
+        (r.picker_name || '').toLowerCase().includes(search) ||
+        (r.picker_dni || '').toLowerCase().includes(search)
       );
     }
 
@@ -2553,6 +2824,7 @@
           <div class="data-card-name">${escapeHtml(row.name)} <span class="badge ${caseBadgeClass(row.case_type)}">${caseLabel(row.case_type)}</span></div>
           <div class="data-card-sub">DNI ${escapeHtml(row.dni)} · Cartón ${escapeHtml(row.code1)} · Pallet ${escapeHtml(row.code2)}</div>
           ${row.product_codigo ? `<div class="data-card-sub">${escapeHtml(row.product_descripcion || '')} (${escapeHtml(row.product_codigo)}) · Cant: ${escapeHtml(String(row.cantidad ?? ''))}</div>` : ''}
+          ${row.picker_name ? `<div class="data-card-sub">👤 Picker: ${escapeHtml(row.picker_name)} (${escapeHtml(row.picker_dni || '')})</div>` : ''}
           <div class="data-card-sub">${formatDate(row.created_at)}</div>
         </div>
         <div class="data-card-actions">
@@ -2575,11 +2847,15 @@
     const caseSelect = document.getElementById('auditRecordCase');
     const prodInput = document.getElementById('auditRecordProduct');
     const qtyInput = document.getElementById('auditRecordQuantity');
+    const pickerSelect = document.getElementById('auditRecordPicker');
+
+    buildPickerSelectOptions();
 
     if(id === null){
       title.textContent = 'Agregar auditoría';
       nameInput.value = ''; dniInput.value = ''; c1Input.value = ''; c2Input.value = '';
       caseSelect.value = 'conforme'; prodInput.value = ''; qtyInput.value = '';
+      if(pickerSelect) pickerSelect.value = '';
     } else {
       const row = lastAudits.find(r => r.id === id);
       if(!row) return;
@@ -2591,6 +2867,7 @@
       caseSelect.value = row.case_type;
       prodInput.value = row.product_codigo ? (row.product_codigo + ' - ' + (row.product_descripcion || '')) : '';
       qtyInput.value = row.cantidad ?? '';
+      if(pickerSelect) pickerSelect.value = row.picker_dni || '';
     }
     toggleAuditRecordProductFields();
     document.getElementById('auditRecordFormModal').classList.add('open');
@@ -2614,6 +2891,7 @@
     const case_type = document.getElementById('auditRecordCase').value;
     const prodVal = document.getElementById('auditRecordProduct').value.trim();
     const qtyVal = document.getElementById('auditRecordQuantity').value;
+    const pickerDni = document.getElementById('auditRecordPicker').value;
 
     if(!name || !dni || !code1 || !code2){
       showToast('Completa nombre, DNI, cartón y pallet.', true);
@@ -2621,6 +2899,7 @@
     }
 
     let product_codigo = null, product_descripcion = null, cantidad = null;
+    let picker_dni = null, picker_name = null;
     if(case_type === 'sobra' || case_type === 'falta'){
       const idx = prodVal.indexOf(' - ');
       if(idx === -1 || !qtyVal){
@@ -2630,10 +2909,15 @@
       product_codigo = prodVal.slice(0, idx).trim();
       product_descripcion = prodVal.slice(idx + 3).trim();
       cantidad = Number(qtyVal);
+      if(pickerDni){
+        const picker = pickersCache.find(p => p.dni === pickerDni);
+        picker_dni = pickerDni;
+        picker_name = picker ? picker.name : null;
+      }
     }
 
     try{
-      const payload = { name, dni, code1, code2, case_type, product_codigo, product_descripcion, cantidad };
+      const payload = { name, dni, code1, code2, case_type, product_codigo, product_descripcion, cantidad, picker_dni, picker_name };
       if(editingAuditId === null){
         const { error } = await sb.from('audits').insert(payload);
         if(error) throw error;
@@ -2676,6 +2960,8 @@
       'Código producto': r.product_codigo || '',
       'Descripción producto': r.product_descripcion || '',
       'Cantidad': r.cantidad ?? '',
+      'Picker DNI': r.picker_dni || '',
+      'Picker Nombre': r.picker_name || '',
       'Fecha': formatDate(r.created_at)
     }));
     const ws = XLSX.utils.json_to_sheet(rows);

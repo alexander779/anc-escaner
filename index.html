@@ -1020,7 +1020,10 @@
       </button>
       <button class="btn-small" style="width:100%; margin-bottom:20px;" onclick="openDispatchRecordForm(null)">+ Agregar registro manual</button>
 
+      <input type="text" class="modal-input" id="despachoSearchInput" placeholder="Buscar por nombre, DNI, código 1 o código 2" autocomplete="off" oninput="filterDespachoRegistros()" style="margin-bottom:16px;">
+
       <div class="section-title">Últimos registros de despacho</div>
+      <p class="hint" style="margin:-6px 0 12px;">La búsqueda consulta toda la base de datos, no solo lo que se ve en pantalla.</p>
       <div id="despachoRegistrosList"><div class="empty-state"><span class="loading-dot"></span> Cargando...</div></div>
     </div>
 
@@ -1044,7 +1047,10 @@
       </button>
       <button class="btn-small" style="width:100%; margin-bottom:20px;" onclick="openRecordForm(null)">+ Agregar registro manual</button>
 
+      <input type="text" class="modal-input" id="registrosSearchInput" placeholder="Buscar por nombre, DNI, código 1 o código 2" autocomplete="off" oninput="filterRegistros()" style="margin-bottom:16px;">
+
       <div class="section-title">Últimos registros</div>
+      <p class="hint" style="margin:-6px 0 12px;">La búsqueda consulta toda la base de datos, no solo lo que se ve en pantalla.</p>
       <div id="registrosList"><div class="empty-state"><span class="loading-dot"></span> Cargando...</div></div>
     </div>
 
@@ -1115,6 +1121,7 @@
       </div>
 
       <div class="section-title">Últimas auditorías</div>
+      <p class="hint" style="margin:-6px 0 12px;">La búsqueda consulta toda la base de datos, no solo lo que se ve en pantalla.</p>
       <div id="auditoriasList"><div class="empty-state"><span class="loading-dot"></span> Cargando...</div></div>
     </div>
 
@@ -2119,22 +2126,35 @@
 
   /* ============ ADMIN: Registros ============ */
   let lastRegistros = [];
+  let registrosSearchTimeout = null;
+
+  function filterRegistros(){
+    clearTimeout(registrosSearchTimeout);
+    registrosSearchTimeout = setTimeout(loadRegistros, 350);
+  }
 
   async function loadRegistros(){
     const container = document.getElementById('registrosList');
     container.innerHTML = '<div class="empty-state"><span class="loading-dot"></span> Cargando...</div>';
+    const searchEl = document.getElementById('registrosSearchInput');
+    const search = (searchEl ? searchEl.value : '').trim();
     try{
-      const { data, error } = await sb
+      let q = sb
         .from('scans')
         .select('id,name,dni,code1,code2,created_at')
         .order('created_at', { ascending: false })
         .limit(500);
+      if(search){
+        const t = search.replace(/[%,()]/g, '');
+        q = q.or(`name.ilike.%${t}%,dni.ilike.%${t}%,code1.ilike.%${t}%,code2.ilike.%${t}%`);
+      }
+      const { data, error } = await q;
       if(error) throw error;
 
       lastRegistros = data || [];
 
       if(lastRegistros.length === 0){
-        container.innerHTML = '<div class="empty-state">Todavía no hay registros.</div>';
+        container.innerHTML = '<div class="empty-state">' + (search ? 'No se encontraron registros.' : 'Todavía no hay registros.') + '</div>';
         return;
       }
 
@@ -2152,7 +2172,8 @@
         </div>
       `).join('');
     }catch(e){
-      container.innerHTML = '<div class="empty-state">Error al cargar. Desliza para reintentar.</div>';
+      console.error('Error buscando registros:', e);
+      container.innerHTML = '<div class="empty-state">Error al buscar. Intenta de nuevo.</div>';
     }
   }
 
@@ -2232,22 +2253,50 @@
     }
   }
 
-  function downloadExcel(){
-    if(!lastRegistros || lastRegistros.length === 0){
-      showToast('No hay registros para descargar.', true);
-      return;
+  /* Trae TODAS las filas de una tabla sin el límite de 500 que usa la vista en pantalla,
+     paginando de a 1000 en 1000 hasta traer todo. */
+  async function fetchAllRows(table, selectCols, orderCol='created_at'){
+    let all = [];
+    let from = 0;
+    const pageSize = 1000;
+    while(true){
+      const { data, error } = await sb
+        .from(table)
+        .select(selectCols)
+        .order(orderCol, { ascending: false })
+        .range(from, from + pageSize - 1);
+      if(error) throw error;
+      all = all.concat(data || []);
+      if(!data || data.length < pageSize) break;
+      from += pageSize;
     }
-    const rows = lastRegistros.map(r => ({
-      'Nombre': r.name,
-      'DNI': r.dni,
-      'Código 1': r.code1,
-      'Código 2': r.code2,
-      'Fecha': formatDate(r.created_at)
-    }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Registros');
-    XLSX.writeFile(wb, 'registros-anc.xlsx');
+    return all;
+  }
+
+  async function downloadExcel(){
+    showToast('Preparando Excel con todos los registros...');
+    try{
+      const all = await fetchAllRows('scans', 'name,dni,code1,code2,created_at');
+      if(!all || all.length === 0){
+        showToast('No hay registros para descargar.', true);
+        return;
+      }
+      const rows = all.map(r => ({
+        'Nombre': r.name,
+        'DNI': r.dni,
+        'Código 1': r.code1,
+        'Código 2': r.code2,
+        'Fecha': formatDate(r.created_at)
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Registros');
+      XLSX.writeFile(wb, 'registros-anc.xlsx');
+      showToast('Excel descargado ✓ (' + all.length + ' registros)');
+    }catch(e){
+      console.error('Error descargando registros:', e);
+      showToast('No se pudo descargar: ' + (e.message || 'error desconocido'), true);
+    }
   }
 
   /* ============ ADMIN: Despachadores autorizados ============ */
@@ -2327,22 +2376,35 @@
 
   /* ============ ADMIN: Registros de despacho ============ */
   let lastDespachoRegistros = [];
+  let despachoSearchTimeout = null;
+
+  function filterDespachoRegistros(){
+    clearTimeout(despachoSearchTimeout);
+    despachoSearchTimeout = setTimeout(loadDespachoRegistros, 350);
+  }
 
   async function loadDespachoRegistros(){
     const container = document.getElementById('despachoRegistrosList');
     container.innerHTML = '<div class="empty-state"><span class="loading-dot"></span> Cargando...</div>';
+    const searchEl = document.getElementById('despachoSearchInput');
+    const search = (searchEl ? searchEl.value : '').trim();
     try{
-      const { data, error } = await sb
+      let q = sb
         .from('dispatch_records')
         .select('id,name,dni,code1,code2,created_at')
         .order('created_at', { ascending: false })
         .limit(500);
+      if(search){
+        const t = search.replace(/[%,()]/g, '');
+        q = q.or(`name.ilike.%${t}%,dni.ilike.%${t}%,code1.ilike.%${t}%,code2.ilike.%${t}%`);
+      }
+      const { data, error } = await q;
       if(error) throw error;
 
       lastDespachoRegistros = data || [];
 
       if(lastDespachoRegistros.length === 0){
-        container.innerHTML = '<div class="empty-state">Todavía no hay registros de despacho.</div>';
+        container.innerHTML = '<div class="empty-state">' + (search ? 'No se encontraron registros.' : 'Todavía no hay registros de despacho.') + '</div>';
         return;
       }
 
@@ -2360,7 +2422,8 @@
         </div>
       `).join('');
     }catch(e){
-      container.innerHTML = '<div class="empty-state">Error al cargar. Desliza para reintentar.</div>';
+      console.error('Error buscando despacho:', e);
+      container.innerHTML = '<div class="empty-state">Error al buscar. Intenta de nuevo.</div>';
     }
   }
 
@@ -2439,22 +2502,30 @@
     }
   }
 
-  function downloadDespachoExcel(){
-    if(!lastDespachoRegistros || lastDespachoRegistros.length === 0){
-      showToast('No hay registros para descargar.', true);
-      return;
+  async function downloadDespachoExcel(){
+    showToast('Preparando Excel con todos los registros...');
+    try{
+      const all = await fetchAllRows('dispatch_records', 'name,dni,code1,code2,created_at');
+      if(!all || all.length === 0){
+        showToast('No hay registros para descargar.', true);
+        return;
+      }
+      const rows = all.map(r => ({
+        'Nombre': r.name,
+        'DNI': r.dni,
+        'Código 1': r.code1,
+        'Código 2': r.code2,
+        'Fecha': formatDate(r.created_at)
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Despacho');
+      XLSX.writeFile(wb, 'despacho-anc.xlsx');
+      showToast('Excel descargado ✓ (' + all.length + ' registros)');
+    }catch(e){
+      console.error('Error descargando despacho:', e);
+      showToast('No se pudo descargar: ' + (e.message || 'error desconocido'), true);
     }
-    const rows = lastDespachoRegistros.map(r => ({
-      'Nombre': r.name,
-      'DNI': r.dni,
-      'Código 1': r.code1,
-      'Código 2': r.code2,
-      'Fecha': formatDate(r.created_at)
-    }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Despacho');
-    XLSX.writeFile(wb, 'despacho-anc.xlsx');
   }
 
   /* ============ ADMIN: Auditores autorizados ============ */
@@ -2932,22 +3003,36 @@
 
   /* ============ ADMIN: Auditorías ============ */
   let lastAudits = [];
+  let auditoriasSearchTimeout = null;
 
   async function loadAuditorias(){
     const container = document.getElementById('auditoriasList');
     container.innerHTML = '<div class="empty-state"><span class="loading-dot"></span> Cargando...</div>';
+    const caseFilterEl = document.getElementById('auditCaseFilter');
+    const searchEl = document.getElementById('auditSearchInput');
+    const caseFilter = caseFilterEl ? caseFilterEl.value : 'todas';
+    const search = (searchEl ? searchEl.value : '').trim();
     try{
-      const { data, error } = await sb
+      let q = sb
         .from('audits')
         .select('id,dni,name,code1,code2,case_type,product_codigo,product_descripcion,cantidad,picker_dni,picker_name,created_at')
         .order('created_at', { ascending: false })
         .limit(500);
+      if(caseFilter !== 'todas'){
+        q = q.eq('case_type', caseFilter);
+      }
+      if(search){
+        const t = search.replace(/[%,()]/g, '');
+        q = q.or(`name.ilike.%${t}%,dni.ilike.%${t}%,code1.ilike.%${t}%,code2.ilike.%${t}%,product_codigo.ilike.%${t}%,product_descripcion.ilike.%${t}%,picker_name.ilike.%${t}%,picker_dni.ilike.%${t}%`);
+      }
+      const { data, error } = await q;
       if(error) throw error;
 
       lastAudits = data || [];
       renderAuditoriasList();
     }catch(e){
-      container.innerHTML = '<div class="empty-state">Error al cargar. Desliza para reintentar.</div>';
+      console.error('Error buscando auditorías:', e);
+      container.innerHTML = '<div class="empty-state">Error al buscar. Intenta de nuevo.</div>';
     }
   }
 
@@ -3087,36 +3172,20 @@
   }
 
   function filterAuditorias(){
-    renderAuditoriasList();
+    clearTimeout(auditoriasSearchTimeout);
+    auditoriasSearchTimeout = setTimeout(loadAuditorias, 350);
   }
 
   function renderAuditoriasList(){
     const container = document.getElementById('auditoriasList');
     if(!container) return;
-    const caseFilterEl = document.getElementById('auditCaseFilter');
     const searchEl = document.getElementById('auditSearchInput');
-    const caseFilter = caseFilterEl ? caseFilterEl.value : 'todas';
-    const search = (searchEl ? searchEl.value : '').trim().toLowerCase();
+    const search = (searchEl ? searchEl.value : '').trim();
 
-    let list = lastAudits;
-    if(caseFilter !== 'todas'){
-      list = list.filter(r => r.case_type === caseFilter);
-    }
-    if(search){
-      list = list.filter(r =>
-        (r.name || '').toLowerCase().includes(search) ||
-        (r.dni || '').toLowerCase().includes(search) ||
-        (r.code1 || '').toLowerCase().includes(search) ||
-        (r.code2 || '').toLowerCase().includes(search) ||
-        (r.product_codigo || '').toLowerCase().includes(search) ||
-        (r.product_descripcion || '').toLowerCase().includes(search) ||
-        (r.picker_name || '').toLowerCase().includes(search) ||
-        (r.picker_dni || '').toLowerCase().includes(search)
-      );
-    }
+    const list = lastAudits;
 
     if(list.length === 0){
-      container.innerHTML = '<div class="empty-state">No se encontraron auditorías.</div>';
+      container.innerHTML = '<div class="empty-state">' + (search ? 'No se encontraron auditorías.' : 'Todavía no hay auditorías.') + '</div>';
       return;
     }
 
@@ -3248,28 +3317,36 @@
     }
   }
 
-  function downloadAuditoriasExcel(){
-    if(!lastAudits || lastAudits.length === 0){
-      showToast('No hay auditorías para descargar.', true);
-      return;
+  async function downloadAuditoriasExcel(){
+    showToast('Preparando Excel con todas las auditorías...');
+    try{
+      const all = await fetchAllRows('audits', 'name,dni,code1,code2,case_type,product_codigo,product_descripcion,cantidad,picker_dni,picker_name,created_at');
+      if(!all || all.length === 0){
+        showToast('No hay auditorías para descargar.', true);
+        return;
+      }
+      const rows = all.map(r => ({
+        'Nombre': r.name,
+        'DNI': r.dni,
+        'Cartón': r.code1,
+        'Pallet': r.code2,
+        'Resultado': caseLabel(r.case_type),
+        'Código producto': r.product_codigo || '',
+        'Descripción producto': r.product_descripcion || '',
+        'Cantidad': r.cantidad ?? '',
+        'Picker DNI': r.picker_dni || '',
+        'Picker Nombre': r.picker_name || '',
+        'Fecha': formatDate(r.created_at)
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Auditorias');
+      XLSX.writeFile(wb, 'auditorias-anc.xlsx');
+      showToast('Excel descargado ✓ (' + all.length + ' auditorías)');
+    }catch(e){
+      console.error('Error descargando auditorías:', e);
+      showToast('No se pudo descargar: ' + (e.message || 'error desconocido'), true);
     }
-    const rows = lastAudits.map(r => ({
-      'Nombre': r.name,
-      'DNI': r.dni,
-      'Cartón': r.code1,
-      'Pallet': r.code2,
-      'Resultado': caseLabel(r.case_type),
-      'Código producto': r.product_codigo || '',
-      'Descripción producto': r.product_descripcion || '',
-      'Cantidad': r.cantidad ?? '',
-      'Picker DNI': r.picker_dni || '',
-      'Picker Nombre': r.picker_name || '',
-      'Fecha': formatDate(r.created_at)
-    }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Auditorias');
-    XLSX.writeFile(wb, 'auditorias-anc.xlsx');
   }
 
   /* ============ UTILIDADES ============ */

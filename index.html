@@ -1063,6 +1063,7 @@
       <button class="tab-btn" id="tabBtnRegistros" data-role="fileo" onclick="showAdminTab('registros')">Fileo</button>
       <button class="tab-btn" id="tabBtnAuditores" data-role="auditoria" onclick="showAdminTab('auditores')">DNIs auditoría</button>
       <button class="tab-btn" id="tabBtnAuditorias" data-role="auditoria" onclick="showAdminTab('auditorias')">Auditorías</button>
+      <button class="tab-btn" id="tabBtnRestricciones" data-role="auditoria" onclick="showAdminTab('restricciones')">Restricciones de escaneo</button>
       <button class="tab-btn" id="tabBtnProductos" onclick="showAdminTab('productos')">Productos</button>
       <button class="tab-btn" id="tabBtnPickers" onclick="showAdminTab('pickers')">Pickers</button>
       <button class="tab-btn" id="tabBtnAdmins" onclick="showAdminTab('admins')">Administradores</button>
@@ -1197,6 +1198,33 @@
       <div class="section-title">Últimas auditorías</div>
       <p class="hint" style="margin:-6px 0 12px;">La búsqueda consulta toda la base de datos, no solo lo que se ve en pantalla.</p>
       <div id="auditoriasList"><div class="empty-state"><span class="loading-dot"></span> Cargando...</div></div>
+    </div>
+
+    <!-- Tab: Restricciones de escaneo (auditoría) -->
+    <div id="tabRestricciones" style="display:none">
+      <p class="hint" style="margin:0 0 18px;">
+        Define qué códigos acepta el escáner de auditoría en <b id="restriccionesAlmacenName"></b>. Estas reglas solo aplican al escaneo de <b>auditoría</b> (cartón y pallet) y son independientes por almacén. Deja un campo vacío para no exigir esa condición.
+      </p>
+
+      <div class="picker-match-box">
+        <div class="section-title" style="margin-top:0;">Código 1 · Cartón</div>
+        <div class="form-row">
+          <input type="text" id="restrCode1Prefixes" placeholder="Prefijos permitidos, separados por coma (ej. CT974)">
+          <input type="text" id="restrCode1Length" placeholder="N.º exacto de dígitos (ej. 15)" inputmode="numeric" style="max-width:200px;">
+        </div>
+        <p class="hint" style="margin:6px 0 0;">Ejemplo: el prefijo <code>CT974</code> exige que el código empiece con esas letras/números; el largo exige que el código tenga exactamente esa cantidad de caracteres en total.</p>
+      </div>
+
+      <div class="picker-match-box">
+        <div class="section-title" style="margin-top:0;">Código 2 · Pallet</div>
+        <div class="form-row">
+          <input type="text" id="restrCode2Prefixes" placeholder="Prefijos permitidos, separados por coma (ej. 01PL, 05PL)">
+          <input type="text" id="restrCode2Length" placeholder="N.º exacto de dígitos (ej. 15)" inputmode="numeric" style="max-width:200px;">
+        </div>
+      </div>
+
+      <button class="send-btn" style="width:100%;" onclick="saveAuditScanRules()">Guardar restricciones</button>
+      <p class="hint" id="restriccionesMsg" style="margin-top:10px;"></p>
     </div>
 
     <!-- Tab: Pickers -->
@@ -1417,6 +1445,7 @@
     ALMACEN_ID = id;
     localStorage.setItem('anc_almacen_id', id);
     applyRoleVisibility();
+    loadAuditScanRules();
     showScreen('screenRole');
   }
 
@@ -1518,13 +1547,45 @@
   let html5Qr = null;
   let activeSlot = null;
 
-  /* Prefijos permitidos por escáner */
+  /* Prefijos y longitud por defecto para escaneo de fileo/despacho (no configurables por ahora) */
   const CODE1_PREFIX = 'CT979000';
   const CODE2_PREFIXES = ['01PL', '05PL'];
   /* Longitud exacta esperada de cada código (ej. CT9790000147407 / 01PL97900102730) */
   const CODE_LENGTH = 15;
 
-  function isValidCodeForSlot(slotNum, text){
+  /* ============ RESTRICCIONES DE ESCANEO DE AUDITORÍA (configurables por el admin, por almacén) ============
+     Se guardan en la tabla scan_rules (almacen_id, slot, prefixes, length).
+     Si un almacén no tiene reglas guardadas para un código, no se exige ninguna condición sobre ese código
+     (se acepta cualquier valor escaneado o escrito a mano). */
+  let auditScanRules = {
+    1: { prefixes: [], length: null },
+    2: { prefixes: [], length: null }
+  };
+
+  async function loadAuditScanRules(){
+    auditScanRules = { 1: { prefixes: [], length: null }, 2: { prefixes: [], length: null } };
+    if(!ALMACEN_ID) return;
+    try{
+      const { data, error } = await sb
+        .from('scan_rules')
+        .select('slot,prefixes,length')
+        .eq('almacen_id', ALMACEN_ID);
+      if(error) throw error;
+      (data || []).forEach(row => {
+        const prefixes = (row.prefixes || '').split(',').map(p => p.trim()).filter(Boolean);
+        auditScanRules[row.slot] = { prefixes, length: row.length || null };
+      });
+    }catch(e){
+      console.error('No se pudieron cargar las restricciones de escaneo de auditoría:', e);
+    }
+  }
+
+  function isValidCodeForSlot(slotNum, text, mode='staff'){
+    if(mode === 'audit'){
+      const rule = auditScanRules[slotNum];
+      if(!rule || rule.prefixes.length === 0) return true; // sin restricción configurada para este almacén
+      return rule.prefixes.some(p => text.startsWith(p));
+    }
     if(slotNum === 1){
       return text.startsWith(CODE1_PREFIX);
     }
@@ -1534,7 +1595,12 @@
     return true;
   }
 
-  function invalidCodeMessage(slotNum){
+  function invalidCodeMessage(slotNum, mode='staff'){
+    if(mode === 'audit'){
+      const rule = auditScanRules[slotNum] || { prefixes: [] };
+      const label = slotNum === 1 ? 'El cartón' : 'El pallet';
+      return 'Código inválido. ' + label + ' debe empezar con ' + rule.prefixes.join(' o ') + '. Escanea de nuevo.';
+    }
     if(slotNum === 1){
       return 'Código inválido. El código 1 debe empezar con ' + CODE1_PREFIX + '. Escanea de nuevo.';
     }
@@ -1543,11 +1609,25 @@
 
   /* Validación adicional SOLO para ingreso manual: exige el prefijo Y la cantidad exacta de dígitos */
   function isValidManualCodeForSlot(slotNum, mode, text){
-    if(!isValidCodeForSlot(slotNum, text)) return false;
+    if(!isValidCodeForSlot(slotNum, text, mode)) return false;
+    if(mode === 'audit'){
+      const rule = auditScanRules[slotNum];
+      if(rule && rule.length) return text.length === rule.length;
+      return true; // sin longitud configurada para este almacén: no se exige
+    }
     return text.length === CODE_LENGTH;
   }
 
   function invalidManualCodeMessage(slotNum, mode){
+    if(mode === 'audit'){
+      const rule = auditScanRules[slotNum] || { prefixes: [], length: null };
+      const label = slotNum === 1 ? 'Cartón' : 'Pallet';
+      const parts = [];
+      if(rule.prefixes.length) parts.push('empezar con ' + rule.prefixes.join(' o '));
+      if(rule.length) parts.push('tener ' + rule.length + ' caracteres en total');
+      if(parts.length === 0) return label + ' inválido.';
+      return label + ' inválido. Debe ' + parts.join(' y ') + '.';
+    }
     if(slotNum === 1){
       return 'Cartón inválido. Debe empezar con ' + CODE1_PREFIX + ' y tener ' + CODE_LENGTH + ' caracteres en total (ej. CT9790000147407).';
     }
@@ -1614,10 +1694,10 @@
       { fps: 12, qrbox: { width: 260, height: 160 } },
       (decodedText) => {
         const text = decodedText.trim();
-        if(!isValidCodeForSlot(activeSlot, text)){
+        if(!isValidCodeForSlot(activeSlot, text, scanMode)){
           const now = Date.now();
           if(text !== lastInvalidText || (now - lastInvalidToastAt) > 2000){
-            showToast(invalidCodeMessage(activeSlot), true);
+            showToast(invalidCodeMessage(activeSlot, scanMode), true);
             lastInvalidText = text;
             lastInvalidToastAt = now;
           }
@@ -1776,10 +1856,27 @@
     const hint = document.getElementById('manualEntryHint');
     const store = mode === 'audit' ? scannedAudit : (mode === 'despacho' ? scannedDespacho : scanned);
     input.value = store[slotNum] || '';
-    input.setAttribute('maxlength', CODE_LENGTH);
-    if(hint){
-      hint.textContent = 'Debe tener exactamente ' + CODE_LENGTH + ' caracteres. Ej: ' + (slotNum === 1 ? 'CT9790000147407' : '01PL97900102730');
-      hint.style.display = 'block';
+    if(mode === 'audit'){
+      const rule = auditScanRules[slotNum] || { prefixes: [], length: null };
+      if(rule.length) input.setAttribute('maxlength', rule.length);
+      else input.removeAttribute('maxlength');
+      if(hint){
+        const parts = [];
+        if(rule.length) parts.push('tener exactamente ' + rule.length + ' caracteres');
+        if(rule.prefixes.length) parts.push('empezar con ' + rule.prefixes.join(' o '));
+        if(parts.length){
+          hint.textContent = 'Debe ' + parts.join(' y ') + '.';
+          hint.style.display = 'block';
+        } else {
+          hint.style.display = 'none';
+        }
+      }
+    } else {
+      input.setAttribute('maxlength', CODE_LENGTH);
+      if(hint){
+        hint.textContent = 'Debe tener exactamente ' + CODE_LENGTH + ' caracteres. Ej: ' + (slotNum === 1 ? 'CT9790000147407' : '01PL97900102730');
+        hint.style.display = 'block';
+      }
     }
     document.getElementById('manualEntryModal').classList.add('open');
     setTimeout(()=> input.focus(), 100);
@@ -1985,6 +2082,7 @@
       document.getElementById('auditWelcomeDni').textContent = 'DNI ' + auditorDni;
       resetAuditScanState();
       await ensureProductsLoaded();
+      await loadAuditScanRules();
       showScreen('screenAuditScan');
     }catch(e){
       msg.textContent = 'Error de conexión. Intenta de nuevo.';
@@ -2464,7 +2562,7 @@
   }
 
   function showAdminTab(tab){
-    const tabs = ['dnis', 'auditores', 'productos', 'registros', 'auditorias', 'dnisDespacho', 'despacho', 'pickers', 'admins', 'bitacora'];
+    const tabs = ['dnis', 'auditores', 'productos', 'registros', 'auditorias', 'restricciones', 'dnisDespacho', 'despacho', 'pickers', 'admins', 'bitacora'];
     tabs.forEach(t => {
       const suffix = t.charAt(0).toUpperCase() + t.slice(1);
       const btn = document.getElementById('tabBtn' + suffix);
@@ -2476,6 +2574,7 @@
     if(tab === 'auditores') loadAuditoresList();
     if(tab === 'productos'){ ensureProductsLoaded(true).then(renderAdminProductsList); }
     if(tab === 'auditorias'){ ensurePickersLoaded(true).then(loadAuditorias); }
+    if(tab === 'restricciones') loadAuditScanRulesIntoForm();
     if(tab === 'dnisDespacho') loadDispatchersList();
     if(tab === 'despacho') loadDespachoRegistros();
     if(tab === 'pickers'){ ensurePickersLoaded(true).then(renderPickersList); }
@@ -3056,6 +3155,61 @@
       loadAuditoresList();
     }catch(e){
       showToast('No se pudo eliminar.', true);
+    }
+  }
+
+  /* ============ ADMIN: Restricciones de escaneo (auditoría) ============ */
+  async function loadAuditScanRulesIntoForm(){
+    const nameTag = document.getElementById('restriccionesAlmacenName');
+    if(nameTag) nameTag.textContent = currentAlmacenName();
+    const msg = document.getElementById('restriccionesMsg');
+    if(msg) msg.textContent = '';
+    await loadAuditScanRules();
+    document.getElementById('restrCode1Prefixes').value = auditScanRules[1].prefixes.join(', ');
+    document.getElementById('restrCode1Length').value = auditScanRules[1].length || '';
+    document.getElementById('restrCode2Prefixes').value = auditScanRules[2].prefixes.join(', ');
+    document.getElementById('restrCode2Length').value = auditScanRules[2].length || '';
+  }
+
+  async function saveAuditScanRules(){
+    const msg = document.getElementById('restriccionesMsg');
+    msg.textContent = '';
+
+    const parseRule = (prefixesRaw, lengthRaw) => {
+      const prefixes = prefixesRaw.split(',').map(p => p.trim().toUpperCase()).filter(Boolean);
+      const lengthTrim = lengthRaw.trim();
+      const length = lengthTrim ? parseInt(lengthTrim, 10) : null;
+      return { prefixes, length: (length && length > 0) ? length : null };
+    };
+
+    const rule1 = parseRule(
+      document.getElementById('restrCode1Prefixes').value,
+      document.getElementById('restrCode1Length').value
+    );
+    const rule2 = parseRule(
+      document.getElementById('restrCode2Prefixes').value,
+      document.getElementById('restrCode2Length').value
+    );
+
+    try{
+      const rows = [
+        { almacen_id: ALMACEN_ID, slot: 1, prefixes: rule1.prefixes.join(','), length: rule1.length },
+        { almacen_id: ALMACEN_ID, slot: 2, prefixes: rule2.prefixes.join(','), length: rule2.length }
+      ];
+      const { error } = await sb.from('scan_rules').upsert(rows, { onConflict: 'almacen_id,slot' });
+      if(error) throw error;
+
+      auditScanRules = { 1: rule1, 2: rule2 };
+
+      const detailParts = [];
+      detailParts.push('Cartón: ' + (rule1.prefixes.length ? 'prefijo ' + rule1.prefixes.join('/') : 'sin prefijo') + ', ' + (rule1.length ? rule1.length + ' caracteres' : 'sin largo fijo'));
+      detailParts.push('Pallet: ' + (rule2.prefixes.length ? 'prefijo ' + rule2.prefixes.join('/') : 'sin prefijo') + ', ' + (rule2.length ? rule2.length + ' caracteres' : 'sin largo fijo'));
+      await logAdminActivity('editar', 'Restricciones de escaneo', ALMACEN_ID, detailParts.join(' · '));
+
+      showToast('Restricciones guardadas ✓');
+    }catch(e){
+      msg.textContent = 'No se pudieron guardar las restricciones. Intenta de nuevo.';
+      showToast('No se pudo guardar.', true);
     }
   }
 

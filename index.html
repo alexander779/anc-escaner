@@ -3735,10 +3735,10 @@
       const sheet = wb.Sheets[sheetName];
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
 
-      const LPN_HEADERS = ['NRO LPN', 'N LPN', 'LPN', 'CARTON', 'NRO CARTON'];
+      const LPN_HEADERS = ['NRO LPN', 'N LPN', 'LPN', 'CARTON', 'NRO CARTON', 'NUM CARTON'];
       const CODIGO_HEADERS = ['CODIGO', 'CODIGO PRODUCTO', 'COD PRODUCTO'];
-      const PICKER_HEADERS = ['DETAIL PICK USER', 'PICK USER', 'USUARIO PICKING', 'PICKER'];
-      const PICKED_TIME_HEADERS = ['DETAIL PICKED TIME', 'PICKED TIME', 'HORA PICKING', 'FECHA PICKING'];
+      const PICKER_HEADERS = ['DETAIL PICK USER', 'PICK USER', 'USUARIO PICKING', 'PICKER', 'USUA PICK'];
+      const PICKED_TIME_HEADERS = ['DETAIL PICKED TIME', 'PICKED TIME', 'HORA PICKING', 'FECHA PICKING', 'TIEMPO PICK'];
 
       let headerRowIdx = -1, colLpn = -1, colCodigo = -1, colPicker = -1, colPickedTime = -1;
       for(let i = 0; i < Math.min(rows.length, 10); i++){
@@ -3756,7 +3756,7 @@
 
       if(headerRowIdx === -1){
         statusEl.textContent = '';
-        showToast('No se encontraron las columnas "Nro LPN", "Codigo" y "Detail Pick User" en la hoja "' + sheetName + '".', true);
+        showToast('No se encontraron las columnas de cartón, código y picker en "' + sheetName + '". Usa un archivo con columnas Nro LPN/Num Cartón, Codigo y Detail Pick User/Usua Pick.', true);
         return;
       }
 

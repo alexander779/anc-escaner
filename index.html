@@ -3255,7 +3255,7 @@
       return;
     }
     try{
-      const { error } = await sb.from('products').upsert({ codigo, descripcion, almacen_id: ALMACEN_ID });
+      const { error } = await sb.from('products').upsert({ codigo, descripcion, almacen_id: ALMACEN_ID }, { onConflict: 'codigo,almacen_id' });
       if(error) throw error;
       document.getElementById('newProductCodigo').value = '';
       document.getElementById('newProductDescripcion').value = '';
@@ -3305,7 +3305,7 @@
       return;
     }
     try{
-      const { error } = await sb.from('products').upsert({ codigo, descripcion, almacen_id: ALMACEN_ID });
+      const { error } = await sb.from('products').upsert({ codigo, descripcion, almacen_id: ALMACEN_ID }, { onConflict: 'codigo,almacen_id' });
       if(error) throw error;
       showToast(editingProductCodigo ? 'Producto actualizado ✓' : 'Producto agregado ✓');
       await logAdminActivity(editingProductCodigo ? 'editar' : 'crear', 'Producto', codigo, `Producto ${codigo} — ${descripcion}`);
@@ -3381,7 +3381,7 @@
       const chunkSize = 500;
       for(let i = 0; i < products.length; i += chunkSize){
         const chunk = products.slice(i, i + chunkSize);
-        const { error } = await sb.from('products').upsert(chunk, { onConflict: 'codigo' });
+        const { error } = await sb.from('products').upsert(chunk, { onConflict: 'codigo,almacen_id' });
         if(error) throw error;
       }
 

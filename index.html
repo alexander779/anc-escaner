@@ -3264,7 +3264,8 @@
       await ensureProductsLoaded(true);
       renderAdminProductsList();
     }catch(e){
-      showToast('No se pudo agregar el producto.', true);
+      showToast('No se pudo agregar el producto: ' + (e.message || 'error desconocido'), true);
+      console.error('Error agregando producto:', e);
     }
   }
 
@@ -3313,7 +3314,8 @@
       await ensureProductsLoaded(true);
       renderAdminProductsList();
     }catch(e){
-      showToast('No se pudo guardar el producto.', true);
+      showToast('No se pudo guardar el producto: ' + (e.message || 'error desconocido'), true);
+      console.error('Error guardando producto:', e);
     }
   }
 
@@ -3377,21 +3379,36 @@
         return;
       }
 
-      showToast('Importando ' + products.length + ' productos...');
+      /* Si el mismo código aparece varias veces en el archivo, nos quedamos
+         solo con la última fila (la más reciente en el Excel) para evitar
+         que la base de datos rechace la carga completa por códigos repetidos. */
+      const dedupMap = new Map();
+      let duplicateCount = 0;
+      for(const p of products){
+        if(dedupMap.has(p.codigo)) duplicateCount++;
+        dedupMap.set(p.codigo, p);
+      }
+      const dedupedProducts = Array.from(dedupMap.values());
+      if(duplicateCount > 0){
+        showToast(`Se encontraron ${duplicateCount} código(s) repetidos en el archivo; se usará la última descripción de cada uno.`);
+      }
+
+      showToast('Importando ' + dedupedProducts.length + ' productos...');
       const chunkSize = 500;
-      for(let i = 0; i < products.length; i += chunkSize){
-        const chunk = products.slice(i, i + chunkSize);
+      for(let i = 0; i < dedupedProducts.length; i += chunkSize){
+        const chunk = dedupedProducts.slice(i, i + chunkSize);
         const { error } = await sb.from('products').upsert(chunk, { onConflict: 'codigo,almacen_id' });
         if(error) throw error;
       }
 
-      showToast('Productos importados ✓ (' + products.length + ')');
-      await logAdminActivity('importar', 'Producto', null, `Se importaron ${products.length} productos desde Excel`);
+      showToast('Productos importados ✓ (' + dedupedProducts.length + ')');
+      await logAdminActivity('importar', 'Producto', null, `Se importaron ${dedupedProducts.length} productos desde Excel`);
       fileInput.value = '';
       await ensureProductsLoaded(true);
       renderAdminProductsList();
     }catch(e){
-      showToast('No se pudo importar el Excel.', true);
+      showToast('No se pudo importar el Excel: ' + (e.message || 'error desconocido'), true);
+      console.error('Error importando productos:', e);
     }
   }
 

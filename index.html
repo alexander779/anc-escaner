@@ -1003,6 +1003,15 @@
       </div>
     </div>
 
+    <div class="stub" id="auditBultosWrap" style="display:none;">
+      <div class="stub-top">
+        <div class="fixed-row">
+          <span class="k">Bultos</span>
+          <input class="v input-field" id="auditBultosInput" type="number" inputmode="numeric" min="0" step="1" placeholder="Cantidad de bultos" oninput="updateAuditSendBtnState()">
+        </div>
+      </div>
+    </div>
+
     <div class="section-title">Resultado de la auditoría</div>
     <div class="case-options">
       <button type="button" class="case-btn case-over" id="caseBtnSobra" onclick="selectAuditCase('sobra')">Sobra</button>
@@ -2105,9 +2114,18 @@
   function resetAuditScanState(){
     scannedAudit = { 1: null, 2: null };
     auditItems = [];
+    const bultosInput = document.getElementById('auditBultosInput');
+    if(bultosInput) bultosInput.value = '';
     clearAuditCaseFields();
     renderAuditItemsList();
     updateAuditScanUI();
+    updateAuditBultosVisibility();
+  }
+
+  function updateAuditBultosVisibility(){
+    const wrap = document.getElementById('auditBultosWrap');
+    if(!wrap) return;
+    wrap.style.display = (ALMACEN_ID === '974') ? 'block' : 'none';
   }
 
   function clearAuditCaseFields(){
@@ -2236,6 +2254,11 @@
     const sendBtn = document.getElementById('auditSendBtn');
     sendBtn.disabled = true;
 
+    const bultosInput = document.getElementById('auditBultosInput');
+    const bultosVal = (ALMACEN_ID === '974' && bultosInput && bultosInput.value !== '')
+      ? Number(bultosInput.value)
+      : null;
+
     const payload = auditItems.map(it => ({
       dni: auditorDni,
       name: auditorName,
@@ -2245,6 +2268,7 @@
       product_codigo: it.product_codigo,
       product_descripcion: it.product_descripcion,
       cantidad: it.cantidad,
+      bultos: bultosVal,
       almacen_id: ALMACEN_ID
     }));
 

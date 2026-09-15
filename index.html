@@ -4057,26 +4057,31 @@
   async function downloadAuditoriasExcel(){
     showToast('Preparando Excel con las auditorías de este almacén...');
     try{
-      const all = await fetchAllRows('audits', 'name,dni,code1,code2,case_type,product_codigo,product_descripcion,cantidad,picker_dni,picker_name,picker_picked_at,picker_turno,created_at', 'created_at', { almacen_id: ALMACEN_ID });
+      const all = await fetchAllRows('audits', 'name,dni,code1,code2,case_type,product_codigo,product_descripcion,cantidad,bultos,picker_dni,picker_name,picker_picked_at,picker_turno,created_at', 'created_at', { almacen_id: ALMACEN_ID });
       if(!all || all.length === 0){
         showToast('No hay auditorías para descargar.', true);
         return;
       }
-      const rows = all.map(r => ({
-        'Nombre': r.name,
-        'DNI': r.dni,
-        'Cartón': r.code1,
-        'Pallet': r.code2,
-        'Resultado': caseLabel(r.case_type),
-        'Código producto': r.product_codigo || '',
-        'Descripción producto': r.product_descripcion || '',
-        'Cantidad': r.cantidad ?? '',
-        'Picker DNI': r.picker_dni || '',
-        'Picker Nombre': r.picker_name || '',
-        'Turno picking': turnoLabel(r.picker_turno),
-        'Hora picking': r.picker_picked_at ? formatDate(r.picker_picked_at) : '',
-        'Fecha': formatDate(r.created_at)
-      }));
+      const isSur = (ALMACEN_ID === '974');
+      const rows = all.map(r => {
+        const row = {
+          'Nombre': r.name,
+          'DNI': r.dni,
+          'Cartón': r.code1,
+          'Pallet': r.code2
+        };
+        if(isSur) row['Bultos'] = r.bultos ?? '';
+        row['Resultado'] = caseLabel(r.case_type);
+        row['Código producto'] = r.product_codigo || '';
+        row['Descripción producto'] = r.product_descripcion || '';
+        row['Cantidad'] = r.cantidad ?? '';
+        row['Picker DNI'] = r.picker_dni || '';
+        row['Picker Nombre'] = r.picker_name || '';
+        row['Turno picking'] = turnoLabel(r.picker_turno);
+        row['Hora picking'] = r.picker_picked_at ? formatDate(r.picker_picked_at) : '';
+        row['Fecha'] = formatDate(r.created_at);
+        return row;
+      });
       const ws = XLSX.utils.json_to_sheet(rows);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Auditorias');

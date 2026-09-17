@@ -530,6 +530,40 @@
     color:var(--ink-soft);
   }
 
+  /* Producción en vivo del auditor (solo CD Sur) */
+  .prod-badge{
+    flex-shrink:0;
+    min-width:96px;
+    text-align:center;
+    background:var(--teal);
+    border-radius:12px;
+    padding:8px 12px;
+    margin-left:14px;
+    transition:transform .18s ease;
+  }
+  .prod-badge.bump{transform:scale(1.08);}
+  .prod-badge-top{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:9.5px;
+    letter-spacing:.09em;
+    text-transform:uppercase;
+    color:rgba(255,255,255,.8);
+  }
+  .prod-badge-num{
+    font-family:'Archivo',sans-serif;
+    font-weight:800;
+    font-size:26px;
+    line-height:1.05;
+    color:var(--white);
+    font-variant-numeric:tabular-nums;
+  }
+  .prod-badge-sub{
+    font-family:'Inter',sans-serif;
+    font-size:10.5px;
+    color:rgba(255,255,255,.88);
+    line-height:1.25;
+  }
+
   /* Pestañas admin */
   .tabs{
     display:flex;
@@ -978,6 +1012,11 @@
         <div class="welcome-name" id="auditWelcomeName">—</div>
         <div class="welcome-dni" id="auditWelcomeDni">—</div>
       </div>
+      <div class="prod-badge" id="auditProdBadge" style="display:none;">
+        <div class="prod-badge-top" id="auditProdTurno">Turno —</div>
+        <div class="prod-badge-num" id="auditProdCount">0</div>
+        <div class="prod-badge-sub" id="auditProdSub">auditorías</div>
+      </div>
     </div>
 
     <div class="stub">
@@ -1215,10 +1254,10 @@
       <div class="picker-match-box">
         <div class="section-title" style="margin-top:0;">Código 1 · Cartón</div>
         <div class="form-row">
-          <input type="text" id="restrCode1Prefixes" placeholder="Prefijos permitidos, separados por coma (ej. CT974)">
+          <input type="text" id="restrCode1Prefixes" placeholder="Prefijos permitidos, separados por coma (ej. CT985)">
           <input type="text" id="restrCode1Length" placeholder="N.º exacto de dígitos (ej. 15)" inputmode="numeric" style="max-width:200px;">
         </div>
-        <p class="hint" style="margin:6px 0 0;">Ejemplo: el prefijo <code>CT974</code> exige que el código empiece con esas letras/números; el largo exige que el código tenga exactamente esa cantidad de caracteres en total.</p>
+        <p class="hint" style="margin:6px 0 0;">Ejemplo: el prefijo <code>CT985</code> exige que el código empiece con esas letras/números; el largo exige que el código tenga exactamente esa cantidad de caracteres en total.</p>
       </div>
 
       <div class="picker-match-box">
@@ -1403,6 +1442,9 @@
   const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
   /* ============ ALMACÉN (multi-sede) ============ */
+  // Sede con funciones extra: campo "Bultos" y contador de producción en vivo.
+  const ALMACEN_SUR_ID = '985';
+
   // Agrega aquí cada nuevo almacén: id, nombre, sede/distrito y qué roles tiene activos.
   // roles válidos: 'despacho', 'fileo', 'auditoria', 'admin' (admin siempre disponible).
   const ALMACEN_LIST = [
@@ -1413,7 +1455,7 @@
       roles: ['despacho', 'fileo', 'auditoria', 'admin']
     },
     {
-      id: '974',
+      id: '985',
       nombre: 'CD Sur',
       sede: 'Villa El Salvador',
       roles: ['auditoria', 'admin']
@@ -2089,6 +2131,7 @@
       resetAuditScanState();
       await ensureProductsLoaded();
       await loadAuditScanRules();
+      startProductionTracking();
       showScreen('screenAuditScan');
     }catch(e){
       msg.textContent = 'Error de conexión. Intenta de nuevo.';
@@ -2099,12 +2142,109 @@
   }
 
   function logoutAuditor(){
+    stopProductionTracking();
+    prodLastCount = null;
     auditorName = null;
     auditorDni = null;
     document.getElementById('auditDniInput').value = '';
     document.getElementById('auditDniLoginMsg').textContent = '';
     showScreen('screenRole');
   }
+
+  /* ============ AUDITORÍA: producción en vivo (solo CD Sur 985) ============ */
+  /* Jornada = turno actual. Día 07:00–19:59 · Noche 20:00–06:59 */
+  let prodTimer = null;
+  let prodLastCount = null;
+
+  function jornadaInfo(now = new Date()){
+    const h = now.getHours();
+    const start = new Date(now);
+    let turno;
+    if(h >= 7 && h < 20){
+      turno = 'dia';
+      start.setHours(7, 0, 0, 0);
+    } else if(h >= 20){
+      turno = 'noche';
+      start.setHours(20, 0, 0, 0);
+    } else {
+      turno = 'noche';
+      start.setDate(start.getDate() - 1);
+      start.setHours(20, 0, 0, 0);
+    }
+    return { turno, start };
+  }
+
+  function prodEnabled(){
+    return ALMACEN_ID === ALMACEN_SUR_ID && !!auditorDni;
+  }
+
+  async function refreshAuditProduction(){
+    const badge = document.getElementById('auditProdBadge');
+    if(!badge) return;
+    if(!prodEnabled()){ badge.style.display = 'none'; return; }
+    badge.style.display = 'block';
+
+    const { turno, start } = jornadaInfo();
+    const turnoEl = document.getElementById('auditProdTurno');
+    if(turnoEl) turnoEl.textContent = 'Turno ' + (turno === 'dia' ? 'día' : 'noche');
+
+    try{
+      const { data, error } = await sb
+        .from('audits')
+        .select('code1,code2,bultos')
+        .eq('almacen_id', ALMACEN_ID)
+        .eq('dni', auditorDni)
+        .gte('created_at', start.toISOString());
+
+      if(error) throw error;
+
+      // Una auditoría = un par cartón+pallet (un guardado inserta varias filas).
+      const vistos = new Map();
+      (data || []).forEach(r => {
+        const key = (r.code1 || '') + '|' + (r.code2 || '');
+        if(!vistos.has(key)) vistos.set(key, Number(r.bultos) || 0);
+      });
+
+      const auditorias = vistos.size;
+      let bultos = 0;
+      vistos.forEach(v => { bultos += v; });
+
+      const numEl = document.getElementById('auditProdCount');
+      const subEl = document.getElementById('auditProdSub');
+      if(numEl) numEl.textContent = auditorias;
+      if(subEl) subEl.textContent = auditorias === 1 ? 'auditoría' : 'auditorías';
+      if(subEl && bultos > 0) subEl.textContent += ' · ' + bultos + ' bultos';
+
+      if(prodLastCount !== null && auditorias > prodLastCount){
+        badge.classList.add('bump');
+        setTimeout(() => badge.classList.remove('bump'), 220);
+      }
+      prodLastCount = auditorias;
+    }catch(e){
+      console.error('No se pudo actualizar la producción:', e);
+    }
+  }
+
+  function startProductionTracking(){
+    stopProductionTracking();
+    if(!prodEnabled()){
+      const badge = document.getElementById('auditProdBadge');
+      if(badge) badge.style.display = 'none';
+      return;
+    }
+    prodLastCount = null;
+    refreshAuditProduction();
+    prodTimer = setInterval(refreshAuditProduction, 20000);
+  }
+
+  function stopProductionTracking(){
+    if(prodTimer){ clearInterval(prodTimer); prodTimer = null; }
+  }
+
+  // Refresca al volver a la app (pestaña en segundo plano / pantalla bloqueada)
+  document.addEventListener('visibilitychange', () => {
+    if(!document.hidden && prodTimer) refreshAuditProduction();
+  });
 
   /* ============ AUDITORÍA: escaneo y resultado ============ */
   let auditCase = null; // 'sobra' | 'falta' | 'conforme'
@@ -2125,7 +2265,7 @@
   function updateAuditBultosVisibility(){
     const wrap = document.getElementById('auditBultosWrap');
     if(!wrap) return;
-    wrap.style.display = (ALMACEN_ID === '974') ? 'block' : 'none';
+    wrap.style.display = (ALMACEN_ID === ALMACEN_SUR_ID) ? 'block' : 'none';
   }
 
   function clearAuditCaseFields(){
@@ -2255,7 +2395,7 @@
     sendBtn.disabled = true;
 
     const bultosInput = document.getElementById('auditBultosInput');
-    const bultosVal = (ALMACEN_ID === '974' && bultosInput && bultosInput.value !== '')
+    const bultosVal = (ALMACEN_ID === ALMACEN_SUR_ID && bultosInput && bultosInput.value !== '')
       ? Number(bultosInput.value)
       : null;
 
@@ -2277,6 +2417,7 @@
       if(error) throw error;
       showToast(payload.length > 1 ? 'Auditoría guardada (' + payload.length + ' registros) ✓' : 'Auditoría guardada ✓');
       resetAuditScanState();
+      refreshAuditProduction();
     }catch(e){
       showToast('No se pudo guardar la auditoría.', true);
     }finally{
@@ -4062,7 +4203,7 @@
         showToast('No hay auditorías para descargar.', true);
         return;
       }
-      const isSur = (ALMACEN_ID === '974');
+      const isSur = (ALMACEN_ID === ALMACEN_SUR_ID);
       const rows = all.map(r => {
         const row = {
           'Nombre': r.name,

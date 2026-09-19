@@ -1111,6 +1111,7 @@
       <button class="tab-btn" id="tabBtnRegistros" data-role="fileo" onclick="showAdminTab('registros')">Fileo</button>
       <button class="tab-btn" id="tabBtnAuditores" data-role="auditoria" onclick="showAdminTab('auditores')">DNIs auditoría</button>
       <button class="tab-btn" id="tabBtnAuditorias" data-role="auditoria" onclick="showAdminTab('auditorias')">Auditorías</button>
+      <button class="tab-btn" id="tabBtnProduccion" data-role="auditoria" onclick="showAdminTab('produccion')" hidden>Producción</button>
       <button class="tab-btn" id="tabBtnRestricciones" data-role="auditoria" onclick="showAdminTab('restricciones')">Restricciones de escaneo</button>
       <button class="tab-btn" id="tabBtnProductos" onclick="showAdminTab('productos')">Productos</button>
       <button class="tab-btn" id="tabBtnPickers" onclick="showAdminTab('pickers')">Pickers</button>
@@ -1243,6 +1244,20 @@
       <div class="section-title">Últimas auditorías</div>
       <p class="hint" style="margin:-6px 0 12px;">La búsqueda consulta toda la base de datos, no solo lo que se ve en pantalla.</p>
       <div id="auditoriasList"><div class="empty-state"><span class="loading-dot"></span> Cargando...</div></div>
+    </div>
+
+    <!-- Tab: Producción por día (solo CD Sur / 985) -->
+    <div id="tabProduccion" style="display:none">
+      <div class="form-row">
+        <input type="date" id="prodFechaInput" onchange="loadProduccionDia()">
+        <select id="prodTurnoFilter" onchange="loadProduccionDia()">
+          <option value="todos">Todos los turnos</option>
+          <option value="dia">Turno día</option>
+          <option value="tarde">Turno tarde</option>
+        </select>
+      </div>
+      <p class="hint" style="margin:0 0 16px;">Producción de auditoría por persona para el día elegido. Se cuenta un par cartón+pallet como una auditoría.</p>
+      <div id="produccionList"><div class="empty-state"><span class="loading-dot"></span> Cargando...</div></div>
     </div>
 
     <!-- Tab: Restricciones de escaneo (auditoría) -->
@@ -2152,30 +2167,60 @@
   }
 
   /* ============ AUDITORÍA: producción en vivo (solo CD Sur 985) ============ */
-  /* Jornada = turno actual. Día 07:00–19:59 · Noche 20:00–06:59 */
+  /* Turno día 07:00–16:00 · Turno tarde 12:00–21:00 (se solapan, así que el
+     turno de cada persona se define por roster fijo, no por la hora de ingreso).
+     El contador siempre cuenta desde las 00:00 del día en curso y se reinicia
+     solo a medianoche (ambos turnos caben dentro del mismo día calendario). */
   let prodTimer = null;
   let prodLastCount = null;
 
-  function jornadaInfo(now = new Date()){
-    const h = now.getHours();
-    const start = new Date(now);
-    let turno;
-    if(h >= 7 && h < 20){
-      turno = 'dia';
-      start.setHours(7, 0, 0, 0);
-    } else if(h >= 20){
-      turno = 'noche';
-      start.setHours(20, 0, 0, 0);
-    } else {
-      turno = 'noche';
-      start.setDate(start.getDate() - 1);
-      start.setHours(20, 0, 0, 0);
-    }
-    return { turno, start };
+  const AUDITOR_TURNO_ROSTER = {
+    'alejandra ramos': 'dia',
+    'dafne donayre': 'dia',
+    'jessica ancajima': 'dia',
+    'blanca sairitupac': 'tarde',
+    'sandra moncada': 'tarde',
+    'jacky minaya': 'tarde'
+  };
+
+  function normalizeAuditorName(s){
+    return (s || '')
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function turnoForAuditorName(name, at = new Date()){
+    const known = AUDITOR_TURNO_ROSTER[normalizeAuditorName(name)];
+    if(known) return known;
+    // Sin roster (persona nueva): estimado por hora de ingreso.
+    const h = at.getHours();
+    if(h < 12) return 'dia';
+    if(h >= 16) return 'tarde';
+    return 'dia';
+  }
+
+  function startOfToday(){
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
   }
 
   function prodEnabled(){
     return ALMACEN_ID === ALMACEN_SUR_ID && !!auditorDni;
+  }
+
+  // Agrupa filas de "audits" en auditorías (un par cartón+pallet = 1 auditoría) y suma bultos.
+  function summarizeAuditRows(rows){
+    const vistos = new Map();
+    (rows || []).forEach(r => {
+      const key = (r.code1 || '') + '|' + (r.code2 || '');
+      if(!vistos.has(key)) vistos.set(key, Number(r.bultos) || 0);
+    });
+    let bultos = 0;
+    vistos.forEach(v => { bultos += v; });
+    return { auditorias: vistos.size, bultos };
   }
 
   async function refreshAuditProduction(){
@@ -2184,9 +2229,9 @@
     if(!prodEnabled()){ badge.style.display = 'none'; return; }
     badge.style.display = 'block';
 
-    const { turno, start } = jornadaInfo();
+    const turno = turnoForAuditorName(auditorName);
     const turnoEl = document.getElementById('auditProdTurno');
-    if(turnoEl) turnoEl.textContent = 'Turno ' + (turno === 'dia' ? 'día' : 'noche');
+    if(turnoEl) turnoEl.textContent = 'Turno ' + (turno === 'dia' ? 'día' : 'tarde');
 
     try{
       const { data, error } = await sb
@@ -2194,20 +2239,11 @@
         .select('code1,code2,bultos')
         .eq('almacen_id', ALMACEN_ID)
         .eq('dni', auditorDni)
-        .gte('created_at', start.toISOString());
+        .gte('created_at', startOfToday().toISOString());
 
       if(error) throw error;
 
-      // Una auditoría = un par cartón+pallet (un guardado inserta varias filas).
-      const vistos = new Map();
-      (data || []).forEach(r => {
-        const key = (r.code1 || '') + '|' + (r.code2 || '');
-        if(!vistos.has(key)) vistos.set(key, Number(r.bultos) || 0);
-      });
-
-      const auditorias = vistos.size;
-      let bultos = 0;
-      vistos.forEach(v => { bultos += v; });
+      const { auditorias, bultos } = summarizeAuditRows(data);
 
       const numEl = document.getElementById('auditProdCount');
       const subEl = document.getElementById('auditProdSub');
@@ -2235,6 +2271,9 @@
     prodLastCount = null;
     refreshAuditProduction();
     prodTimer = setInterval(refreshAuditProduction, 20000);
+
+    // Si el turno queda abierto pasada la medianoche, al cruzarla el contador
+    // vuelve a 0 automáticamente porque startOfToday() avanza de día.
   }
 
   function stopProductionTracking(){
@@ -2245,6 +2284,74 @@
   document.addEventListener('visibilitychange', () => {
     if(!document.hidden && prodTimer) refreshAuditProduction();
   });
+
+  /* ============ ADMIN: producción por día (solo CD Sur 985) ============ */
+  async function loadProduccionDia(){
+    const container = document.getElementById('produccionList');
+    if(!container) return;
+    container.innerHTML = '<div class="empty-state"><span class="loading-dot"></span> Cargando...</div>';
+
+    const fechaInput = document.getElementById('prodFechaInput');
+    const turnoFilter = document.getElementById('prodTurnoFilter') ? document.getElementById('prodTurnoFilter').value : 'todos';
+
+    // Default: hoy, en la fecha local (no UTC).
+    if(fechaInput && !fechaInput.value){
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      fechaInput.value = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
+    }
+    const [y, m, d] = fechaInput.value.split('-').map(Number);
+    const dayStart = new Date(y, m - 1, d, 0, 0, 0, 0);
+    const dayEnd = new Date(y, m - 1, d + 1, 0, 0, 0, 0);
+
+    try{
+      const { data, error } = await sb
+        .from('audits')
+        .select('name,dni,code1,code2,bultos,created_at')
+        .eq('almacen_id', ALMACEN_ID)
+        .gte('created_at', dayStart.toISOString())
+        .lt('created_at', dayEnd.toISOString());
+
+      if(error) throw error;
+
+      // Agrupa por persona (dni) y dentro de cada una, por cartón+pallet.
+      const porPersona = new Map();
+      (data || []).forEach(r => {
+        const key = r.dni || r.name || '—';
+        if(!porPersona.has(key)) porPersona.set(key, { name: r.name, dni: r.dni, rows: [] });
+        porPersona.get(key).rows.push(r);
+      });
+
+      let personas = Array.from(porPersona.values()).map(p => {
+        const { auditorias, bultos } = summarizeAuditRows(p.rows);
+        const turno = turnoForAuditorName(p.name);
+        return { name: p.name, dni: p.dni, turno, auditorias, bultos };
+      });
+
+      if(turnoFilter !== 'todos'){
+        personas = personas.filter(p => p.turno === turnoFilter);
+      }
+
+      personas.sort((a, b) => b.auditorias - a.auditorias);
+
+      if(personas.length === 0){
+        container.innerHTML = '<div class="empty-state">No hay auditorías registradas ese día con este filtro.</div>';
+        return;
+      }
+
+      container.innerHTML = personas.map(p => `
+        <div class="data-card">
+          <div class="data-card-main">
+            <div class="data-card-name">${escapeHtml(p.name || 'Sin nombre')}</div>
+            <div class="data-card-sub">DNI ${escapeHtml(p.dni || '—')} · Turno ${p.turno === 'dia' ? 'día' : 'tarde'}</div>
+            <div class="data-card-sub"><b>${p.auditorias}</b> ${p.auditorias === 1 ? 'auditoría' : 'auditorías'}${p.bultos > 0 ? ' · ' + p.bultos + ' bultos' : ''}</div>
+          </div>
+        </div>
+      `).join('');
+    }catch(e){
+      container.innerHTML = '<div class="empty-state">Error al cargar. Desliza para reintentar.</div>';
+    }
+  }
 
   /* ============ AUDITORÍA: escaneo y resultado ============ */
   let auditCase = null; // 'sobra' | 'falta' | 'conforme'
@@ -2704,6 +2811,8 @@
       const role = btn.getAttribute('data-role');
       btn.hidden = !almacenHasRole(role);
     });
+    const prodBtn = document.getElementById('tabBtnProduccion');
+    if(prodBtn) prodBtn.hidden = !(almacenHasRole('auditoria') && ALMACEN_ID === ALMACEN_SUR_ID);
   }
 
   function firstAvailableAdminTab(){
@@ -2724,7 +2833,7 @@
   }
 
   function showAdminTab(tab){
-    const tabs = ['dnis', 'auditores', 'productos', 'registros', 'auditorias', 'restricciones', 'dnisDespacho', 'despacho', 'pickers', 'admins', 'bitacora'];
+    const tabs = ['dnis', 'auditores', 'productos', 'registros', 'auditorias', 'produccion', 'restricciones', 'dnisDespacho', 'despacho', 'pickers', 'admins', 'bitacora'];
     tabs.forEach(t => {
       const suffix = t.charAt(0).toUpperCase() + t.slice(1);
       const btn = document.getElementById('tabBtn' + suffix);
@@ -2736,6 +2845,7 @@
     if(tab === 'auditores') loadAuditoresList();
     if(tab === 'productos'){ ensureProductsLoaded(true).then(renderAdminProductsList); }
     if(tab === 'auditorias'){ ensurePickersLoaded(true).then(loadAuditorias); }
+    if(tab === 'produccion') loadProduccionDia();
     if(tab === 'restricciones') loadAuditScanRulesIntoForm();
     if(tab === 'dnisDespacho') loadDispatchersList();
     if(tab === 'despacho') loadDespachoRegistros();
